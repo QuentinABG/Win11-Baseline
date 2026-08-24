@@ -4,7 +4,7 @@
 ![Platform](https://img.shields.io/badge/Windows-11-0078D6?logo=windows&logoColor=white)
 ![License](https://img.shields.io/badge/Licence-MIT-green)
 
-Application graphique PowerShell pour initialiser et durcir un poste client Windows 11. Un seul fichier `.ps1`, aucune installation : configuration réseau, jonction au domaine, mappage de lecteurs, et durcissement **à la carte** selon **CIS Benchmark** ou **ANSSI BP‑028**.
+Application graphique PowerShell pour initialiser et durcir un poste client Windows 11. Configuration réseau, jonction au domaine, mappage de lecteurs, et durcissement **à la carte** selon **CIS Benchmark** ou **ANSSI BP‑028**.
 
 > ⚠️ Sous‑ensemble représentatif de mesures CIS / ANSSI — **ni exhaustif, ni une certification de conformité**. Testez sur un poste pilote ; en production, privilégiez GPO / Intune.
 
@@ -12,6 +12,7 @@ Application graphique PowerShell pour initialiser et durcir un poste client Wind
 
 ## Lancement
 
+Via Powershell :
 ```powershell
 irm https://raw.githubusercontent.com/QuentinABG/Win11-Baseline/main/Init-WindowsClient11.ps1 | iex
 ```
