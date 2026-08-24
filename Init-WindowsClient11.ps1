@@ -46,7 +46,10 @@
     un poste pilote ; en production privilegiez GPO / Microsoft Intune.
 #>
 
-[CmdletBinding()]
+# NOTE : pas de [CmdletBinding()] ici. Sous Windows PowerShell 5.1,
+# Invoke-Expression (le 'iex' de 'irm | iex') refuse un attribut place
+# devant param() : le script echouerait sur "Attribut inattendu".
+# Un bloc param() nu, lui, est accepte (c'est ce que fait WinUtil).
 param(
     [Alias('CLI')]
     [switch]$NoGUI,
