@@ -24,19 +24,12 @@ irm https://raw.githubusercontent.com/QuentinABG/Win11-Baseline/main/Init-Window
   <img src="https://raw.githubusercontent.com/QuentinABG/Win11-Baseline/main/screenshot.png" alt="Interface de Win11-Baseline" width="900">
 </p>
 
-Modèle [WinUtil](https://github.com/ChrisTitusTech/winutil) : thème sombre, navigation latérale, un interrupteur par mesure (info‑bulle + pastille `Sensible` / `Risque élevé` / `Redémarrage`), journal temps réel repliable. L'exécution se fait dans un runspace séparé — la fenêtre reste réactive.
-
-Les étapes qui demandent une saisie (IP, renommage, jonction AD, mappage) ont un formulaire dédié dans l'onglet *Système et réseau*.
 
 ---
 
 ## Catalogue
 
 35 actions. Liste complète avec identifiants et niveaux de risque :
-
-```powershell
-&([scriptblock]::Create((irm 'https://raw.githubusercontent.com/QuentinABG/Win11-Baseline/main/Init-WindowsClient11.ps1'))) -ListActions
-```
 
 | Catégorie | Contenu |
 |-----------|---------|
@@ -47,30 +40,6 @@ Les étapes qui demandent une saisie (IP, renommage, jonction AD, mappage) ont u
 | **Renforcé** | Règles ASR, VBS / Credential Guard, effacement du pagefile, PowerShell v2 off, `RemoteSigned`, bannière légale |
 
 **Préréglages** (cumulatifs, un clic coche le niveau) : CIS `L1` = Socle + Intermédiaire, `L2` = + Élevé — ANSSI `Minimal` = Socle, `Intermédiaire`, `Élevé`, `Renforcé` = + la catégorie du même nom.
-
----
-
-## Déploiement sans interface
-
-```powershell
-# Un niveau complet
-&([scriptblock]::Create((irm 'https://raw.githubusercontent.com/QuentinABG/Win11-Baseline/main/Init-WindowsClient11.ps1'))) -NoGUI -Preset ANSSI-Eleve
-
-# Des mesures précises
-&([scriptblock]::Create((irm '<url>'))) -NoGUI -Actions SEC-Firewall,SEC-SMB1Off,SEC-LLMNR
-```
-
-| Paramètre | Rôle |
-|-----------|------|
-| `-NoGUI` (alias `-CLI`) | Sans interface, aucune interaction. |
-| `-Preset <niveau>` | `CIS-L1`, `CIS-L2`, `ANSSI-Minimal`, `ANSSI-Intermediaire`, `ANSSI-Eleve`, `ANSSI-Renforce` |
-| `-Actions <id,...>` | Identifiants d'actions, cumulable avec `-Preset`. |
-| `-ListActions` | Affiche le catalogue et quitte. |
-
-Codes de sortie : `0` succès, `1` au moins un échec, `2` identifiant inconnu.
-
-> `irm ... | iex` ne transmet pas de paramètres : utilisez la forme `&([scriptblock]::Create(...))`.
-> Les actions de type formulaire sont ignorées en mode `-NoGUI` (saisies impossibles).
 
 ---
 
