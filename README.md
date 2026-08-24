@@ -21,9 +21,7 @@ irm https://raw.githubusercontent.com/QuentinABG/Win11-Baseline/main/Init-Window
 ## Interface
 
 <p align="center">
-  <img src="docs/screenshot.png" alt="Interface de Win11-Baseline" width="900">
-  <br>
-  <em>Capture d'écran à ajouter dans <code>docs/screenshot.png</code></em>
+  <img src="https://raw.githubusercontent.com/QuentinABG/Win11-Baseline/main/screenshot.png" alt="Interface de Win11-Baseline" width="900">
 </p>
 
 Modèle [WinUtil](https://github.com/ChrisTitusTech/winutil) : thème sombre, navigation latérale, un interrupteur par mesure (info‑bulle + pastille `Sensible` / `Risque élevé` / `Redémarrage`), journal temps réel repliable. L'exécution se fait dans un runspace séparé — la fenêtre reste réactive.
