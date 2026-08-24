@@ -1,4 +1,4 @@
-﻿#Requires -Version 5.1
+#Requires -Version 5.1
 <#
 .SYNOPSIS
     Win11-Baseline - Application graphique d'initialisation et de durcissement
@@ -127,6 +127,37 @@ try {
 # de filtre pour les injecter dans l'InitialSessionState des runspaces.
 # =====================================================================
 
+function Get-W11BText {
+    <#
+    .SYNOPSIS
+        Decode les libelles echappes en references numeriques (&#233; -> e accent).
+    .DESCRIPTION
+        Le fichier est volontairement en ASCII PUR, pour une raison precise :
+          * avec un BOM UTF-8, 'irm | iex' echoue (le BOM se colle au premier
+            jeton, #Requires devient une commande et param() n'est plus la
+            premiere instruction) ;
+          * sans BOM, Windows PowerShell 5.1 lit un .ps1 local en ANSI et
+            afficherait les accents en caracteres errones.
+        Les textes visibles sont donc stockes echappes et decodes ici, a
+        l'execution. Le XAML, lui, n'a besoin de rien : XML interprete
+        nativement &#233; a la lecture.
+    #>
+    param([string]$Text)
+    if (-not $Text) { return $Text }
+    return [regex]::Replace($Text, '&#(\d+);', { param($m) [char][int]$m.Groups[1].Value })
+}
+
+function Show-W11BMessage {
+    <# .SYNOPSIS Boite de dialogue WPF, texte decode. #>
+    param(
+        [Parameter(Mandatory)][string]$Text,
+        [string]$Title  = 'Win11-Baseline',
+        [string]$Button = 'OK',
+        [string]$Icon   = 'Information'
+    )
+    return [System.Windows.MessageBox]::Show((Get-W11BText $Text), (Get-W11BText $Title), $Button, $Icon)
+}
+
 function Write-W11BLog {
     <#
     .SYNOPSIS
@@ -141,7 +172,7 @@ function Write-W11BLog {
         [ValidateSet('INFO','RUN','OK','WARN','ERR','STEP')]
         [string]$Level = 'INFO'
     )
-    $line = "[{0}] [{1,-4}] {2}" -f (Get-Date -Format 'HH:mm:ss'), $Level, $Message
+    $line = "[{0}] [{1,-4}] {2}" -f (Get-Date -Format 'HH:mm:ss'), $Level, (Get-W11BText $Message)
     try { [System.IO.File]::AppendAllText($sync.LogFile, $line + [Environment]::NewLine, [Text.Encoding]::UTF8) } catch { }
     if ($sync.LogQueue) { $sync.LogQueue.Enqueue($line) }
     if ($sync.ConsoleEcho) {
@@ -735,7 +766,7 @@ function Invoke-W11BAction {
     $fn = if ($Undo) { $Action.Undo } else { $Action.Apply }
     if (-not $fn) {
         Write-W11BLog -Level 'WARN' -Message "$($Action.Name) : aucune annulation disponible"
-        return [PSCustomObject]@{ Id = $Action.Id; Status = 'Skipped'; Message = 'Pas d''annulation définie' }
+        return [PSCustomObject]@{ Id = $Action.Id; Status = 'Skipped'; Message = 'Pas d''annulation d&#233;finie' }
     }
 
     $verbe = if ($Undo) { 'Annulation' } else { 'Application' }
@@ -785,7 +816,7 @@ function Invoke-W11BSelection {
     $ordered = @($Ids | Where-Object { $_ -eq 'SYS-RestorePoint' }) + @($Ids | Where-Object { $_ -ne 'SYS-RestorePoint' })
 
     foreach ($id in $ordered) {
-        if ($sync.Cancelled) { Write-W11BLog -Level 'WARN' -Message 'Exécution interrompue par l''utilisateur.'; break }
+        if ($sync.Cancelled) { Write-W11BLog -Level 'WARN' -Message 'Ex&#233;cution interrompue par l''utilisateur.'; break }
 
         $action = Get-W11BAction -Id $id
         if (-not $action) {
@@ -806,11 +837,11 @@ function Invoke-W11BSelection {
     $ok  = @($sync.Results | Where-Object { $_.Status -eq 'OK' }).Count
     $ko  = @($sync.Results | Where-Object { $_.Status -eq 'Error' }).Count
     $sk  = @($sync.Results | Where-Object { $_.Status -eq 'Skipped' }).Count
-    Write-W11BLog -Level 'STEP' -Message "=== TERMINÉ : $ok réussie(s), $ko échec(s), $sk ignorée(s) ==="
-    if ($sync.NeedReboot) { Write-W11BLog -Level 'WARN' -Message 'Un REDÉMARRAGE est nécessaire pour appliquer certains changements.' }
+    Write-W11BLog -Level 'STEP' -Message "=== TERMIN&#201; : $ok r&#233;ussie(s), $ko &#233;chec(s), $sk ignor&#233;e(s) ==="
+    if ($sync.NeedReboot) { Write-W11BLog -Level 'WARN' -Message 'Un RED&#201;MARRAGE est n&#233;cessaire pour appliquer certains changements.' }
     Write-W11BLog -Level 'INFO' -Message "Journal complet : $($sync.LogFile)"
 
-    $sync.CurrentLabel = 'Terminé'
+    $sync.CurrentLabel = 'Termin&#233;'
     $sync.Running      = $false
     $sync.Done         = $true
 }
@@ -835,95 +866,95 @@ $sync.Catalog = @(
 
     # ---------- SOCLE ------------------------------------------------
     @{ Id='SEC-Firewall';        Category='Socle'; Kind='Toggle'; Risk='Faible';   Reboot=$false
-       Name='Pare-feu Windows activé (Domaine / Privé / Public)'
-       Tip='Activé le pare-feu sur les trois profils réseau. Mesure de base CIS L1 et ANSSI Minimal.'
+       Name='Pare-feu Windows activ&#233; (Domaine / Priv&#233; / Public)'
+       Tip='Activ&#233; le pare-feu sur les trois profils r&#233;seau. Mesure de base CIS L1 et ANSSI Minimal.'
        Apply='Invoke-W11BFirewall'; Undo='Undo-W11BFirewall' }
 
     @{ Id='SEC-SMB1Off';         Category='Socle'; Kind='Toggle'; Risk='Faible';   Reboot=$false
-       Name='Protocole SMBv1 (obsolète) désactivé côté serveur'
-       Tip='SMBv1 est le vecteur de WannaCry/NotPetya. Peut casser l''accès à de très vieux NAS ou imprimantes réseau.'
+       Name='Protocole SMBv1 (obsol&#232;te) d&#233;sactiv&#233; c&#244;t&#233; serveur'
+       Tip='SMBv1 est le vecteur de WannaCry/NotPetya. Peut casser l''acc&#232;s &#224; de tr&#232;s vieux NAS ou imprimantes r&#233;seau.'
        Apply='Invoke-W11BSmb1Off'; Undo='Undo-W11BSmb1Off' }
 
     @{ Id='SEC-UAC';             Category='Socle'; Kind='Toggle'; Risk='Faible';   Reboot=$false
-       Name='UAC actif (EnableLUA, invite sur bureau sécurisé)'
-       Tip='Force le contrôle de compte utilisateur, l''invite de consentement administrateur et le bureau sécurisé.'
+       Name='UAC actif (EnableLUA, invite sur bureau s&#233;curis&#233;)'
+       Tip='Force le contr&#244;le de compte utilisateur, l''invite de consentement administrateur et le bureau s&#233;curis&#233;.'
        Apply='Invoke-W11BUac'; Undo='Undo-W11BUac' }
 
     @{ Id='SEC-AutoRun';         Category='Socle'; Kind='Toggle'; Risk='Faible';   Reboot=$false
-       Name='Exécution automatique (AutoRun / AutoPlay) désactivée'
-       Tip='Bloque l''exécution automatique depuis les supports amovibles (clés USB piégées).'
+       Name='Ex&#233;cution automatique (AutoRun / AutoPlay) d&#233;sactiv&#233;e'
+       Tip='Bloque l''ex&#233;cution automatique depuis les supports amovibles (cl&#233;s USB pi&#233;g&#233;es).'
        Apply='Invoke-W11BAutoRunOff'; Undo='Undo-W11BAutoRunOff' }
 
     @{ Id='SEC-Guest';           Category='Socle'; Kind='Toggle'; Risk='Faible';   Reboot=$false
-       Name='Compte Invité (Guest, SID -501) désactivé'
-       Tip='Désactivé le compte Invite quel que soit son nom (identification par SID).'
+       Name='Compte Invit&#233; (Guest, SID -501) d&#233;sactiv&#233;'
+       Tip='D&#233;sactiv&#233; le compte Invite quel que soit son nom (identification par SID).'
        Apply='Invoke-W11BGuestOff'; Undo='Undo-W11BGuestOff' }
 
     @{ Id='SEC-PwdPolicy';       Category='Socle'; Kind='Toggle'; Risk='Sensible'; Reboot=$false
        Name='Politique de mots de passe (>= 14 car., historique, verrouillage)'
-       Tip='ATTENTION : s''applique aux COMPTES LOCAUX. Les utilisateurs dont le mot de passe fait moins de 14 caractères devront le changer au prochain changement. Sans effet sur les comptes de domaine (gérés par GPO).'
+       Tip='ATTENTION : s''applique aux COMPTES LOCAUX. Les utilisateurs dont le mot de passe fait moins de 14 caract&#232;res devront le changer au prochain changement. Sans effet sur les comptes de domaine (g&#233;r&#233;s par GPO).'
        Apply='Invoke-W11BPasswordPolicy'; Undo='Undo-W11BPasswordPolicy' }
 
     @{ Id='SEC-Defender';        Category='Socle'; Kind='Toggle'; Risk='Faible';   Reboot=$false
-       Name='Windows Defender : temps réel + cloud + anti-PUA'
-       Tip='Réactive la protection temps réel, la protection cloud (MAPS) et le blocage des applications potentiellement indésirables.'
+       Name='Windows Defender : temps r&#233;el + cloud + anti-PUA'
+       Tip='R&#233;active la protection temps r&#233;el, la protection cloud (MAPS) et le blocage des applications potentiellement ind&#233;sirables.'
        Apply='Invoke-W11BDefenderBase'; Undo='Undo-W11BDefenderBase' }
 
     # ---------- INTERMEDIAIRE ---------------------------------------
     @{ Id='SEC-SmbSigning';      Category='Intermediaire'; Kind='Toggle'; Risk='Sensible'; Reboot=$false
        Name='Signature SMB obligatoire (serveur et client)'
-       Tip='Bloque les attaques de relais SMB. ATTENTION : peut empêcher l''accès à des partages anciens ne supportant pas la signature.'
+       Tip='Bloque les attaques de relais SMB. ATTENTION : peut emp&#234;cher l''acc&#232;s &#224; des partages anciens ne supportant pas la signature.'
        Apply='Invoke-W11BSmbSigning'; Undo='Undo-W11BSmbSigning' }
 
     @{ Id='SEC-Ntlm';            Category='Intermediaire'; Kind='Toggle'; Risk='Sensible'; Reboot=$false
        Name='NTLM durci : refus LM / NTLMv1, pas de hash LM'
-       Tip='LmCompatibilityLevel = 5 (NTLMv2 uniquement). ATTENTION : coupe l''authentification vers des serveurs ou NAS anciens limités à NTLMv1.'
+       Tip='LmCompatibilityLevel = 5 (NTLMv2 uniquement). ATTENTION : coupe l''authentification vers des serveurs ou NAS anciens limit&#233;s &#224; NTLMv1.'
        Apply='Invoke-W11BNtlmHardening'; Undo='Undo-W11BNtlmHardening' }
 
     @{ Id='SEC-Anonymous';       Category='Intermediaire'; Kind='Toggle'; Risk='Faible';   Reboot=$false
-       Name='Accès anonyme restreint (RestrictAnonymous / SAM)'
-       Tip='Empêche l''enumeration anonyme des comptes et des partages.'
+       Name='Acc&#232;s anonyme restreint (RestrictAnonymous / SAM)'
+       Tip='Emp&#234;che l''enumeration anonyme des comptes et des partages.'
        Apply='Invoke-W11BAnonymousRestrict'; Undo='Undo-W11BAnonymousRestrict' }
 
     @{ Id='SEC-LLMNR';           Category='Intermediaire'; Kind='Toggle'; Risk='Faible';   Reboot=$false
-       Name='Résolution LLMNR désactivée (anti-spoofing réseau)'
-       Tip='Neutralise les attaques de type Responder. Sans impact si le DNS du réseau est correctement configuré.'
+       Name='R&#233;solution LLMNR d&#233;sactiv&#233;e (anti-spoofing r&#233;seau)'
+       Tip='Neutralise les attaques de type Responder. Sans impact si le DNS du r&#233;seau est correctement configur&#233;.'
        Apply='Invoke-W11BLlmnrOff'; Undo='Undo-W11BLlmnrOff' }
 
     @{ Id='SEC-ScriptLog';       Category='Intermediaire'; Kind='Toggle'; Risk='Faible';   Reboot=$false
        Name='Journalisation des blocs de scripts PowerShell'
-       Tip='Enregistre le code PowerShell exécute dans le journal Microsoft-Windows-PowerShell/Operational (event 4104).'
+       Tip='Enregistre le code PowerShell ex&#233;cute dans le journal Microsoft-Windows-PowerShell/Operational (event 4104).'
        Apply='Invoke-W11BScriptBlockLogging'; Undo='Undo-W11BScriptBlockLogging' }
 
     @{ Id='SEC-AuditBase';       Category='Intermediaire'; Kind='Toggle'; Risk='Faible';   Reboot=$false
        Name='Audit : connexions, ouverture de session, gestion des comptes'
-       Tip='Activé la stratégie d''audit avancée (succès et échecs) via les GUID de catégories, donc indépendamment de la langue de Windows.'
+       Tip='Activ&#233; la strat&#233;gie d''audit avanc&#233;e (succ&#232;s et &#233;checs) via les GUID de cat&#233;gories, donc ind&#233;pendamment de la langue de Windows.'
        Apply='Invoke-W11BAuditBase'; Undo='Undo-W11BAuditBase' }
 
     @{ Id='SEC-ScreenLock';      Category='Intermediaire'; Kind='Toggle'; Risk='Faible';   Reboot=$false
-       Name='Verrouillage écran sur inactivité (900 s)'
-       Tip='Verrouille automatiquement la session après 15 minutes d''inactivité.'
+       Name='Verrouillage &#233;cran sur inactivit&#233; (900 s)'
+       Tip='Verrouille automatiquement la session apr&#232;s 15 minutes d''inactivit&#233;.'
        Apply='Invoke-W11BScreenLock'; Undo='Undo-W11BScreenLock' }
 
     # ---------- ELEVE -----------------------------------------------
     @{ Id='SEC-WDigest';         Category='Eleve'; Kind='Toggle'; Risk='Faible';   Reboot=$false
-       Name='WDigest : mise en cache des identifiants en clair désactivée'
-       Tip='Empêche l''extraction de mots de passe en clair depuis la mémoire (Mimikatz).'
+       Name='WDigest : mise en cache des identifiants en clair d&#233;sactiv&#233;e'
+       Tip='Emp&#234;che l''extraction de mots de passe en clair depuis la m&#233;moire (Mimikatz).'
        Apply='Invoke-W11BWdigestOff'; Undo='Undo-W11BWdigestOff' }
 
     @{ Id='SEC-LsassPPL';        Category='Eleve'; Kind='Toggle'; Risk='Sensible'; Reboot=$true
-       Name='Protection LSASS en processus protégé (RunAsPPL)'
-       Tip='Empêche l''injection dans LSASS. ATTENTION : peut empêcher le chargement de pilotes ou d''antivirus tiers non signes correctement. Redémarrage requis.'
+       Name='Protection LSASS en processus prot&#233;g&#233; (RunAsPPL)'
+       Tip='Emp&#234;che l''injection dans LSASS. ATTENTION : peut emp&#234;cher le chargement de pilotes ou d''antivirus tiers non signes correctement. Red&#233;marrage requis.'
        Apply='Invoke-W11BLsassPpl'; Undo='Undo-W11BLsassPpl' }
 
     @{ Id='SEC-Audit4688';       Category='Eleve'; Kind='Toggle'; Risk='Sensible'; Reboot=$false
-       Name='Audit avancé : création de processus + ligne de commande (4688)'
-       Tip='Très utile en investigation. ATTENTION : volume de journaux important, et la ligne de commande peut contenir des secrets passes en argument.'
+       Name='Audit avanc&#233; : cr&#233;ation de processus + ligne de commande (4688)'
+       Tip='Tr&#232;s utile en investigation. ATTENTION : volume de journaux important, et la ligne de commande peut contenir des secrets passes en argument.'
        Apply='Invoke-W11BAudit4688'; Undo='Undo-W11BAudit4688' }
 
     @{ Id='SEC-Transcription';   Category='Eleve'; Kind='Toggle'; Risk='Sensible'; Reboot=$false
-       Name='Transcription PowerShell activée (C:\PS-Transcripts)'
-       Tip='Enregistre toutes les sessions PowerShell sur disque. Surveillez la place occupée et protégez le dossier en ACL.'
+       Name='Transcription PowerShell activ&#233;e (C:\PS-Transcripts)'
+       Tip='Enregistre toutes les sessions PowerShell sur disque. Surveillez la place occup&#233;e et prot&#233;gez le dossier en ACL.'
        Apply='Invoke-W11BPsTranscription'; Undo='Undo-W11BPsTranscription' }
 
     @{ Id='SEC-RdpNla';          Category='Eleve'; Kind='Toggle'; Risk='Faible';   Reboot=$false
@@ -932,87 +963,94 @@ $sync.Catalog = @(
        Apply='Invoke-W11BRdpNla'; Undo='Undo-W11BRdpNla' }
 
     @{ Id='SEC-RemoteAssist';    Category='Eleve'; Kind='Toggle'; Risk='Sensible'; Reboot=$false
-       Name='Assistance à distance désactivée'
-       Tip='ATTENTION : si votre support interne utilise l''Assistance rapide / Assistance à distance Windows, cette mesure la coupe.'
+       Name='Assistance &#224; distance d&#233;sactiv&#233;e'
+       Tip='ATTENTION : si votre support interne utilise l''Assistance rapide / Assistance &#224; distance Windows, cette mesure la coupe.'
        Apply='Invoke-W11BRemoteAssistOff'; Undo='Undo-W11BRemoteAssistOff' }
 
     @{ Id='SEC-CFA';             Category='Eleve'; Kind='Toggle'; Risk='Eleve';    Reboot=$false
-       Name='Accès protégé aux dossiers (anti-ransomware)'
-       Tip='RISQUE FONCTIONNEL ÉLEVÉ : bloque l''ecriture dans Documents/Images/... par toute application non approuvée. Attendez-vous à devoir autoriser manuellement des logiciels métier.'
+       Name='Acc&#232;s prot&#233;g&#233; aux dossiers (anti-ransomware)'
+       Tip='RISQUE FONCTIONNEL &#201;LEV&#201; : bloque l''ecriture dans Documents/Images/... par toute application non approuv&#233;e. Attendez-vous &#224; devoir autoriser manuellement des logiciels m&#233;tier.'
        Apply='Invoke-W11BControlledFolderAccess'; Undo='Undo-W11BControlledFolderAccess' }
 
     @{ Id='SEC-LdapSigning';     Category='Eleve'; Kind='Toggle'; Risk='Sensible'; Reboot=$false
        Name='Signature LDAP cliente obligatoire'
-       Tip='Exige la signature des requêtes LDAP. ATTENTION : peut casser des applications métier interrogeant l''AD en LDAP simple non chiffré.'
+       Tip='Exige la signature des requ&#234;tes LDAP. ATTENTION : peut casser des applications m&#233;tier interrogeant l''AD en LDAP simple non chiffr&#233;.'
        Apply='Invoke-W11BLdapSigning'; Undo='Undo-W11BLdapSigning' }
 
     @{ Id='SEC-CachedLogons';    Category='Eleve'; Kind='Toggle'; Risk='Eleve';    Reboot=$false
-       Name='Ouvertures de session mises en cache limitées à 4'
-       Tip='RISQUE : sur un portable hors du réseau d''entreprise, un utilisateur dont le cache a été évincé ne pourra plus ouvrir de session. Déconseillé sur les postes nomades partages.'
+       Name='Ouvertures de session mises en cache limit&#233;es &#224; 4'
+       Tip='RISQUE : sur un portable hors du r&#233;seau d''entreprise, un utilisateur dont le cache a &#233;t&#233; &#233;vinc&#233; ne pourra plus ouvrir de session. D&#233;conseill&#233; sur les postes nomades partages.'
        Apply='Invoke-W11BCachedLogons'; Undo='Undo-W11BCachedLogons' }
 
     # ---------- RENFORCE --------------------------------------------
     @{ Id='SEC-ASR';             Category='Renforce'; Kind='Toggle'; Risk='Eleve'; Reboot=$false
-       Name='Règles ASR (Attack Surface Reduction) activées'
-       Tip='RISQUE FONCTIONNEL ÉLEVÉ : bloque notamment les macros Office creant des processus enfants et les exécutables lancés depuis USB. Passez d''abord en mode Audit sur un poste pilote.'
+       Name='R&#232;gles ASR (Attack Surface Reduction) activ&#233;es'
+       Tip='RISQUE FONCTIONNEL &#201;LEV&#201; : bloque notamment les macros Office creant des processus enfants et les ex&#233;cutables lanc&#233;s depuis USB. Passez d''abord en mode Audit sur un poste pilote.'
        Apply='Invoke-W11BAsrRules'; Undo='Undo-W11BAsrRules' }
 
     @{ Id='SEC-VBS';             Category='Renforce'; Kind='Toggle'; Risk='Eleve'; Reboot=$true
-       Name='Sécurité basée sur la virtualisation (VBS) + Credential Guard'
-       Tip='RISQUE ÉLEVÉ : exige un matériel compatible (UEFI, TPM, virtualisation) et rend impossible l''usage d''hyperviseurs tiers (VMware/VirtualBox anciens). Peut empêcher le démarrage sur du matériel non conforme. Redémarrage requis.'
+       Name='S&#233;curit&#233; bas&#233;e sur la virtualisation (VBS) + Credential Guard'
+       Tip='RISQUE &#201;LEV&#201; : exige un mat&#233;riel compatible (UEFI, TPM, virtualisation) et rend impossible l''usage d''hyperviseurs tiers (VMware/VirtualBox anciens). Peut emp&#234;cher le d&#233;marrage sur du mat&#233;riel non conforme. Red&#233;marrage requis.'
        Apply='Invoke-W11BVbsCredentialGuard'; Undo='Undo-W11BVbsCredentialGuard' }
 
     @{ Id='SEC-ClearPageFile';   Category='Renforce'; Kind='Toggle'; Risk='Sensible'; Reboot=$false
-       Name='Effacement du fichier d''échange à l''arrêt'
-       Tip='ATTENTION : allonge très sensiblement la durée d''extinction du poste (plusieurs minutes selon la taille du pagefile).'
+       Name='Effacement du fichier d''&#233;change &#224; l''arr&#234;t'
+       Tip='ATTENTION : allonge tr&#232;s sensiblement la dur&#233;e d''extinction du poste (plusieurs minutes selon la taille du pagefile).'
        Apply='Invoke-W11BClearPageFile'; Undo='Undo-W11BClearPageFile' }
 
     @{ Id='SEC-PSv2';            Category='Renforce'; Kind='Toggle'; Risk='Sensible'; Reboot=$true
-       Name='PowerShell v2 (obsolète) désactivé'
-       Tip='Supprime le moteur v2, qui contourne la journalisation moderne. ATTENTION : de rares outils anciens exigent -Version 2. Redémarrage requis.'
+       Name='PowerShell v2 (obsol&#232;te) d&#233;sactiv&#233;'
+       Tip='Supprime le moteur v2, qui contourne la journalisation moderne. ATTENTION : de rares outils anciens exigent -Version 2. Red&#233;marrage requis.'
        Apply='Invoke-W11BPowerShellV2Off'; Undo='Undo-W11BPowerShellV2Off' }
 
     @{ Id='SEC-ExecPolicy';      Category='Renforce'; Kind='Toggle'; Risk='Faible'; Reboot=$false
-       Name='Politique d''exécution PowerShell : RemoteSigned (machine)'
-       Tip='Autorisé les scripts locaux, exige une signature pour les scripts téléchargés.'
+       Name='Politique d''ex&#233;cution PowerShell : RemoteSigned (machine)'
+       Tip='Autoris&#233; les scripts locaux, exige une signature pour les scripts t&#233;l&#233;charg&#233;s.'
        Apply='Invoke-W11BExecutionPolicy'; Undo='Undo-W11BExecutionPolicy' }
 
     @{ Id='SEC-LegalBanner';     Category='Renforce'; Kind='Toggle'; Risk='Sensible'; Reboot=$false
-       Name='Bannière légale à l''ouverture de session'
-       Tip='ATTENTION : ajoute un écran de consentement à valider AVANT chaque ouverture de session. Adaptez le texte à votre charte informatique.'
+       Name='Banni&#232;re l&#233;gale &#224; l''ouverture de session'
+       Tip='ATTENTION : ajoute un &#233;cran de consentement &#224; valider AVANT chaque ouverture de session. Adaptez le texte &#224; votre charte informatique.'
        Apply='Invoke-W11BLegalBanner'; Undo='Undo-W11BLegalBanner' }
 
     # ---------- SYSTEME / RESEAU (formulaires) -----------------------
     @{ Id='SYS-RestorePoint';    Category='Systeme'; Kind='Toggle'; Risk='Faible'; Reboot=$false
-       Name='Créer un point de restauration avant application'
-       Tip='Fortement recommandé. Permet de revenir à l''état antérieur via la Restauration du système si une mesure casse un usage.'
+       Name='Cr&#233;er un point de restauration avant application'
+       Tip='Fortement recommand&#233;. Permet de revenir &#224; l''&#233;tat ant&#233;rieur via la Restauration du syst&#232;me si une mesure casse un usage.'
        Apply='Invoke-W11BRestorePoint'; Undo=$null }
 
     @{ Id='NET-IPConfig';        Category='Systeme'; Kind='Form';   Risk='Sensible'; Reboot=$false
-       Name='Configuration IP de la carte réseau'
-       Tip='ATTENTION : une IP statique erronée coupe immédiatement le réseau du poste (et une session RDP en cours).'
+       Name='Configuration IP de la carte r&#233;seau'
+       Tip='ATTENTION : une IP statique erron&#233;e coupe imm&#233;diatement le r&#233;seau du poste (et une session RDP en cours).'
        Apply='Set-W11BIPConfiguration'; Undo=$null }
 
     @{ Id='SYS-Rename';          Category='Systeme'; Kind='Form';   Risk='Sensible'; Reboot=$true
        Name='Renommer le poste'
-       Tip='Nom NetBIOS : 15 caractères maximum, lettres/chiffres/tirets. Redémarrage requis.'
+       Tip='Nom NetBIOS : 15 caract&#232;res maximum, lettres/chiffres/tirets. Red&#233;marrage requis.'
        Apply='Set-W11BComputerName'; Undo=$null }
 
     @{ Id='SYS-DomainJoin';      Category='Systeme'; Kind='Form';   Risk='Eleve';    Reboot=$true
        Name='Joindre un domaine Active Directory'
-       Tip='RISQUE ÉLEVÉ : opération difficilement réversible sans intervention sur l''AD. Le renommage éventuel est fait dans la même opération. Redémarrage requis.'
+       Tip='RISQUE &#201;LEV&#201; : op&#233;ration difficilement r&#233;versible sans intervention sur l''AD. Le renommage &#233;ventuel est fait dans la m&#234;me op&#233;ration. Red&#233;marrage requis.'
        Apply='Join-W11BDomain'; Undo=$null }
 
     @{ Id='NET-MapDrive';        Category='Systeme'; Kind='Form';   Risk='Faible';   Reboot=$false
-       Name='Mapper un lecteur réseau (persistant)'
-       Tip='Découverte des partages publiés dans l''AD (sans RSAT) ou saisie manuelle d''un chemin UNC.'
+       Name='Mapper un lecteur r&#233;seau (persistant)'
+       Tip='D&#233;couverte des partages publi&#233;s dans l''AD (sans RSAT) ou saisie manuelle d''un chemin UNC.'
        Apply='New-W11BNetworkDrive'; Undo=$null }
 
     @{ Id='NET-LinkedConn';      Category='Systeme'; Kind='Toggle'; Risk='Sensible'; Reboot=$true
        Name='EnableLinkedConnections (lecteurs visibles en session standard)'
-       Tip='Rend les lecteurs mappés visibles entre le jeton standard et le jeton élevé (UAC). Légèrement permissif du point de vue sécurité. Redémarrage requis.'
+       Tip='Rend les lecteurs mapp&#233;s visibles entre le jeton standard et le jeton &#233;lev&#233; (UAC). L&#233;g&#232;rement permissif du point de vue s&#233;curit&#233;. Red&#233;marrage requis.'
        Apply='Invoke-W11BLinkedConnections'; Undo='Undo-W11BLinkedConnections' }
 )
+
+# Les libelles du catalogue sont stockes echappes (voir Get-W11BText) : on
+# les decode ici, une seule fois, pour l'interface comme pour -ListActions.
+foreach ($a in $sync.Catalog) {
+    $a.Name = Get-W11BText $a.Name
+    $a.Tip  = Get-W11BText $a.Tip
+}
 
 # --- Prereglages (cumulatifs, identiques aux niveaux du script v1) ----
 $sync.Presets = [ordered]@{
@@ -1503,11 +1541,12 @@ $inputXAML = @'
 
     <!-- ============ Navigation laterale (TabControl) ============ -->
     <Style x:Key="SideTab" TargetType="TabItem">
+      <Setter Property="Padding" Value="15,11"/>
       <Setter Property="Template">
         <Setter.Value>
           <ControlTemplate TargetType="TabItem">
             <Border x:Name="Bd" Background="Transparent" BorderThickness="3,0,0,0"
-                    BorderBrush="Transparent" Padding="15,11" Margin="0,1"
+                    BorderBrush="Transparent" Padding="{TemplateBinding Padding}" Margin="0,1"
                     TextElement.Foreground="#B9BEC7">
               <ContentPresenter ContentSource="Header" VerticalAlignment="Center"/>
             </Border>
@@ -1525,6 +1564,29 @@ $inputXAML = @'
         </Setter.Value>
       </Setter>
     </Style>
+    <!-- Sous onglet : meme rendu que SideTab, simplement decale vers la droite -->
+    <Style x:Key="SideSubTab" TargetType="TabItem" BasedOn="{StaticResource SideTab}">
+      <Setter Property="Padding" Value="34,10,15,10"/>
+    </Style>
+
+    <!-- En tete de groupe : un TabItem non selectionnable, purement visuel.
+         IsEnabled=False empeche la selection ; le template ignore l etat desactive
+         pour ne pas griser le libelle. -->
+    <Style x:Key="SideGroupHeader" TargetType="TabItem">
+      <Setter Property="IsEnabled" Value="False"/>
+      <Setter Property="Focusable" Value="False"/>
+      <Setter Property="Template">
+        <Setter.Value>
+          <ControlTemplate TargetType="TabItem">
+            <Border Padding="15,16,15,6">
+              <TextBlock Text="{TemplateBinding Header}" Foreground="#7A8089"
+                         FontSize="11" FontWeight="SemiBold"/>
+            </Border>
+          </ControlTemplate>
+        </Setter.Value>
+      </Setter>
+    </Style>
+
     <Style TargetType="TabControl">
       <Setter Property="Background" Value="Transparent"/>
       <Setter Property="BorderThickness" Value="0"/>
@@ -1600,17 +1662,17 @@ $inputXAML = @'
     <TabControl Grid.Row="1" x:Name="Nav">
 
       <!-- ========== Onglet : Systeme et reseau (formulaires) ========== -->
-      <TabItem Style="{StaticResource SideTab}" Header="Système et réseau">
+      <TabItem Style="{StaticResource SideTab}" Header="Syst&#232;me et r&#233;seau">
         <ScrollViewer VerticalScrollBarVisibility="Auto" Background="{StaticResource BgWindow}">
           <StackPanel Margin="22">
 
             <Border Style="{StaticResource Card}">
               <StackPanel>
-                <TextBlock Text="Sauvegarde préalable" Style="{StaticResource H2}"/>
+                <TextBlock Text="Sauvegarde pr&#233;alable" Style="{StaticResource H2}"/>
                 <CheckBox x:Name="ChkRestorePoint" Style="{StaticResource ToggleSwitch}" Margin="0,8,0,0"
-                          Content="Créer un point de restauration avant application"/>
+                          Content="Cr&#233;er un point de restauration avant application"/>
                 <TextBlock Style="{StaticResource Muted}" Margin="54,6,0,0" FontSize="12"
-                           Text="Recommandé : permet de revenir en arrière via la Restauration du système si une mesure casse un usage."/>
+                           Text="Recommand&#233; : permet de revenir en arri&#232;re via la Restauration du syst&#232;me si une mesure casse un usage."/>
               </StackPanel>
             </Border>
 
@@ -1629,7 +1691,7 @@ $inputXAML = @'
                     <RowDefinition Height="Auto"/><RowDefinition Height="Auto"/>
                     <RowDefinition Height="Auto"/><RowDefinition Height="Auto"/>
                   </Grid.RowDefinitions>
-                  <TextBlock Grid.Row="0" Grid.Column="0" Text="Carte réseau" VerticalAlignment="Center" Margin="0,0,0,8"/>
+                  <TextBlock Grid.Row="0" Grid.Column="0" Text="Carte r&#233;seau" VerticalAlignment="Center" Margin="0,0,0,8"/>
                   <ComboBox  Grid.Row="0" Grid.Column="1" x:Name="CmbAdapter" Style="{StaticResource Cmb}" Margin="0,0,0,8"/>
                   <TextBlock Grid.Row="1" Grid.Column="0" Text="Mode" VerticalAlignment="Center" Margin="0,0,0,8"/>
                   <StackPanel Grid.Row="1" Grid.Column="1" Orientation="Horizontal" Margin="0,0,0,8">
@@ -1644,14 +1706,14 @@ $inputXAML = @'
                   <TextBox   Grid.Row="4" Grid.Column="1" x:Name="TxtGateway" Style="{StaticResource Field}" Margin="0,0,0,8"/>
                   <TextBlock Grid.Row="5" Grid.Column="0" Text="DNS" VerticalAlignment="Center"/>
                   <TextBox   Grid.Row="5" Grid.Column="1" x:Name="TxtDns" Style="{StaticResource Field}"
-                             ToolTip="Plusieurs serveurs : séparez-les par une virgule."/>
+                             ToolTip="Plusieurs serveurs : s&#233;parez-les par une virgule."/>
                 </Grid>
               </StackPanel>
             </Border>
 
             <Border Style="{StaticResource Card}">
               <StackPanel>
-                <TextBlock Text="Identité du poste" Style="{StaticResource H2}"/>
+                <TextBlock Text="Identit&#233; du poste" Style="{StaticResource H2}"/>
                 <CheckBox x:Name="ChkRename" Style="{StaticResource ToggleSwitch}" Margin="0,8,0,10"
                           Content="Renommer le poste"/>
                 <Grid x:Name="GrpRename" IsEnabled="False" Margin="54,0,0,14">
@@ -1660,7 +1722,7 @@ $inputXAML = @'
                   </Grid.ColumnDefinitions>
                   <TextBlock Text="Nouveau nom" VerticalAlignment="Center"/>
                   <TextBox Grid.Column="1" x:Name="TxtNewName" Style="{StaticResource Field}"
-                           ToolTip="15 caractères maximum, lettres / chiffres / tirets."/>
+                           ToolTip="15 caract&#232;res maximum, lettres / chiffres / tirets."/>
                 </Grid>
 
                 <CheckBox x:Name="ChkJoin" Style="{StaticResource ToggleSwitch}" Margin="0,0,0,10"
@@ -1675,7 +1737,7 @@ $inputXAML = @'
                   <TextBlock Grid.Row="0" Text="Domaine" VerticalAlignment="Center" Margin="0,0,0,8"/>
                   <TextBox   Grid.Row="0" Grid.Column="1" x:Name="TxtDomain" Style="{StaticResource Field}" Margin="0,0,0,8"
                              ToolTip="Exemple : monentreprise.local"/>
-                  <TextBlock Grid.Row="1" Text="Compte autorisé" VerticalAlignment="Center" Margin="0,0,0,8"/>
+                  <TextBlock Grid.Row="1" Text="Compte autoris&#233;" VerticalAlignment="Center" Margin="0,0,0,8"/>
                   <TextBox   Grid.Row="1" Grid.Column="1" x:Name="TxtJoinUser" Style="{StaticResource Field}" Margin="0,0,0,8"
                              ToolTip="DOMAINE\Administrateur ou admin@domaine.local"/>
                   <TextBlock Grid.Row="2" Text="Mot de passe" VerticalAlignment="Center"/>
@@ -1686,9 +1748,9 @@ $inputXAML = @'
 
             <Border Style="{StaticResource Card}">
               <StackPanel>
-                <TextBlock Text="Lecteur réseau" Style="{StaticResource H2}"/>
+                <TextBlock Text="Lecteur r&#233;seau" Style="{StaticResource H2}"/>
                 <CheckBox x:Name="ChkDrive" Style="{StaticResource ToggleSwitch}" Margin="0,8,0,12"
-                          Content="Mapper un lecteur réseau (persistant)"/>
+                          Content="Mapper un lecteur r&#233;seau (persistant)"/>
                 <Grid x:Name="GrpDrive" IsEnabled="False" Margin="54,0,0,0">
                   <Grid.ColumnDefinitions>
                     <ColumnDefinition Width="150"/><ColumnDefinition Width="*"/>
@@ -1698,7 +1760,7 @@ $inputXAML = @'
                     <RowDefinition Height="Auto"/><RowDefinition Height="Auto"/>
                     <RowDefinition Height="Auto"/>
                   </Grid.RowDefinitions>
-                  <TextBlock Grid.Row="0" Text="Partages publiés" VerticalAlignment="Center" Margin="0,0,0,8"/>
+                  <TextBlock Grid.Row="0" Text="Partages publi&#233;s" VerticalAlignment="Center" Margin="0,0,0,8"/>
                   <Grid Grid.Row="0" Grid.Column="1" Margin="0,0,0,8">
                     <Grid.ColumnDefinitions>
                       <ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/>
@@ -1706,7 +1768,7 @@ $inputXAML = @'
                     <ComboBox x:Name="CmbShares" Style="{StaticResource Cmb}"/>
                     <Button Grid.Column="1" x:Name="BtnDiscoverAD" Style="{StaticResource BtnSmall}" Margin="8,0,0,0"
                             Content="Rechercher dans l'AD"
-                            ToolTip="Interroge l'annuaire (objets volume) sans RSAT. Nécessite que le poste soit déjà membre du domaine."/>
+                            ToolTip="Interroge l'annuaire (objets volume) sans RSAT. N&#233;cessite que le poste soit d&#233;j&#224; membre du domaine."/>
                   </Grid>
                   <TextBlock Grid.Row="1" Text="Chemin UNC" VerticalAlignment="Center" Margin="0,0,0,8"/>
                   <TextBox   Grid.Row="1" Grid.Column="1" x:Name="TxtUnc" Style="{StaticResource Field}" Margin="0,0,0,8"
@@ -1715,10 +1777,10 @@ $inputXAML = @'
                   <StackPanel Grid.Row="2" Grid.Column="1" Orientation="Horizontal" Margin="0,0,0,8">
                     <ComboBox x:Name="CmbLetter" Style="{StaticResource Cmb}" Width="80"/>
                     <CheckBox x:Name="ChkReplace" Style="{StaticResource ToggleSwitch}" Margin="20,0,0,0"
-                              Content="Remplacer si déjà utilisée"/>
+                              Content="Remplacer si d&#233;j&#224; utilis&#233;e"/>
                   </StackPanel>
                   <CheckBox Grid.Row="3" Grid.ColumnSpan="2" x:Name="ChkDriveCred" Style="{StaticResource ToggleSwitch}"
-                            Margin="0,0,0,10" Content="Utiliser des identifiants spécifiques"/>
+                            Margin="0,0,0,10" Content="Utiliser des identifiants sp&#233;cifiques"/>
                   <Grid Grid.Row="4" Grid.ColumnSpan="2" x:Name="GrpDriveCred" IsEnabled="False">
                     <Grid.ColumnDefinitions>
                       <ColumnDefinition Width="150"/><ColumnDefinition Width="*"/>
@@ -1742,104 +1804,13 @@ $inputXAML = @'
         </ScrollViewer>
       </TabItem>
 
-      <!-- ========== Onglets de securite (contenu genere) ========== -->
-      <TabItem Style="{StaticResource SideTab}" Header="Sécurité — Socle">
-        <Grid Background="{StaticResource BgWindow}">
-          <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/></Grid.RowDefinitions>
-          <Border Grid.Row="0" Padding="22,16,22,10" Background="{StaticResource BgWindow}">
-            <Grid>
-              <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
-              <StackPanel>
-                <TextBlock Text="Socle de sécurité" Style="{StaticResource H2}"/>
-                <TextBlock Style="{StaticResource Muted}" FontSize="12"
-                           Text="Mesures à faible impact fonctionnel. Base de CIS Level 1 et d'ANSSI Minimal."/>
-              </StackPanel>
-              <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
-                <Button x:Name="BtnAllSocle"  Style="{StaticResource BtnSmall}" Content="Tout sélectionner"/>
-                <Button x:Name="BtnNoneSocle" Style="{StaticResource BtnSmall}" Content="Tout désélectionner" Margin="8,0,0,0"/>
-              </StackPanel>
-            </Grid>
-          </Border>
-          <ScrollViewer Grid.Row="1" VerticalScrollBarVisibility="Auto">
-            <StackPanel x:Name="PanelSocle" Margin="22,0,22,22"/>
-          </ScrollViewer>
-        </Grid>
-      </TabItem>
+      <!-- En tete de groupe (non cliquable) -->
+      <TabItem Style="{StaticResource SideGroupHeader}" Header="S&#233;curit&#233;"/>
 
-      <TabItem Style="{StaticResource SideTab}" Header="Sécurité — Intermédiaire">
-        <Grid Background="{StaticResource BgWindow}">
-          <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/></Grid.RowDefinitions>
-          <Border Grid.Row="0" Padding="22,16,22,10">
-            <Grid>
-              <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
-              <StackPanel>
-                <TextBlock Text="Renforcement intermédiaire" Style="{StaticResource H2}"/>
-                <TextBlock Style="{StaticResource Muted}" FontSize="12"
-                           Text="Réseau d'entreprise standard. CIS L1 étendu / ANSSI Intermédiaire."/>
-              </StackPanel>
-              <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
-                <Button x:Name="BtnAllInter"  Style="{StaticResource BtnSmall}" Content="Tout sélectionner"/>
-                <Button x:Name="BtnNoneInter" Style="{StaticResource BtnSmall}" Content="Tout désélectionner" Margin="8,0,0,0"/>
-              </StackPanel>
-            </Grid>
-          </Border>
-          <ScrollViewer Grid.Row="1" VerticalScrollBarVisibility="Auto">
-            <StackPanel x:Name="PanelIntermediaire" Margin="22,0,22,22"/>
-          </ScrollViewer>
-        </Grid>
-      </TabItem>
-
-      <TabItem Style="{StaticResource SideTab}" Header="Sécurité — Élevé">
-        <Grid Background="{StaticResource BgWindow}">
-          <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/></Grid.RowDefinitions>
-          <Border Grid.Row="0" Padding="22,16,22,10">
-            <Grid>
-              <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
-              <StackPanel>
-                <TextBlock Text="Renforcement élevé" Style="{StaticResource H2}"/>
-                <TextBlock Style="{StaticResource Muted}" FontSize="12"
-                           Text="Données sensibles. CIS Level 2 / ANSSI Élevé. Vérifiez les mesures marquées."/>
-              </StackPanel>
-              <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
-                <Button x:Name="BtnAllEleve"  Style="{StaticResource BtnSmall}" Content="Tout sélectionner"/>
-                <Button x:Name="BtnNoneEleve" Style="{StaticResource BtnSmall}" Content="Tout désélectionner" Margin="8,0,0,0"/>
-              </StackPanel>
-            </Grid>
-          </Border>
-          <ScrollViewer Grid.Row="1" VerticalScrollBarVisibility="Auto">
-            <StackPanel x:Name="PanelEleve" Margin="22,0,22,22"/>
-          </ScrollViewer>
-        </Grid>
-      </TabItem>
-
-      <TabItem Style="{StaticResource SideTab}" Header="Sécurité — Renforcé">
-        <Grid Background="{StaticResource BgWindow}">
-          <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/></Grid.RowDefinitions>
-          <Border Grid.Row="0" Padding="22,16,22,10">
-            <Grid>
-              <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
-              <StackPanel>
-                <TextBlock Text="Renforcement maximal" Style="{StaticResource H2}"/>
-                <TextBlock Style="{StaticResource Muted}" FontSize="12"
-                           Text="ANSSI Renforcé. Mesures les plus strictes : testez impérativement sur un poste pilote."/>
-              </StackPanel>
-              <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
-                <Button x:Name="BtnAllRenforce"  Style="{StaticResource BtnSmall}" Content="Tout sélectionner"/>
-                <Button x:Name="BtnNoneRenforce" Style="{StaticResource BtnSmall}" Content="Tout désélectionner" Margin="8,0,0,0"/>
-              </StackPanel>
-            </Grid>
-          </Border>
-          <ScrollViewer Grid.Row="1" VerticalScrollBarVisibility="Auto">
-            <StackPanel x:Name="PanelRenforce" Margin="22,0,22,22"/>
-          </ScrollViewer>
-        </Grid>
-      </TabItem>
-
-      <!-- ========== Onglet : prereglages ========== -->
-      <TabItem Style="{StaticResource SideTab}" Header="Préréglages">
+      <TabItem Style="{StaticResource SideSubTab}" Header="Pr&#233;r&#233;glages">
         <ScrollViewer VerticalScrollBarVisibility="Auto" Background="{StaticResource BgWindow}">
           <StackPanel Margin="22">
-            <TextBlock Text="Préréglages par référentiel" Style="{StaticResource H2}"/>
+            <TextBlock Text="Pr&#233;r&#233;glages par r&#233;f&#233;rentiel" Style="{StaticResource H2}"/>
             <TextBlock Style="{StaticResource Muted}" Margin="0,0,0,16" FontSize="12"
                        Text="Un clic coche les mesures du niveau choisi (les niveaux sont cumulatifs). Vous pouvez ensuite ajuster chaque mesure onglet par onglet avant d'appliquer."/>
 
@@ -1847,10 +1818,10 @@ $inputXAML = @'
               <StackPanel>
                 <TextBlock Text="CIS Benchmark" Style="{StaticResource H2}"/>
                 <StackPanel Orientation="Horizontal" Margin="0,10,0,0">
-                  <Button x:Name="BtnPresetCIS1" Style="{StaticResource BtnBase}" Content="Level 1 — Sécurité de base"
-                          ToolTip="Socle + Intermédiaire : paramètres sûrs à faible impact fonctionnel."/>
-                  <Button x:Name="BtnPresetCIS2" Style="{StaticResource BtnBase}" Content="Level 2 — Défense en profondeur" Margin="10,0,0,0"
-                          ToolTip="L1 + mesures élevées : réservé aux environnements sensibles."/>
+                  <Button x:Name="BtnPresetCIS1" Style="{StaticResource BtnBase}" Content="Level 1 &#8212; S&#233;curit&#233; de base"
+                          ToolTip="Socle + Interm&#233;diaire : param&#232;tres s&#251;rs &#224; faible impact fonctionnel."/>
+                  <Button x:Name="BtnPresetCIS2" Style="{StaticResource BtnBase}" Content="Level 2 &#8212; D&#233;fense en profondeur" Margin="10,0,0,0"
+                          ToolTip="L1 + mesures &#233;lev&#233;es : r&#233;serv&#233; aux environnements sensibles."/>
                 </StackPanel>
               </StackPanel>
             </Border>
@@ -1860,22 +1831,22 @@ $inputXAML = @'
                 <TextBlock Text="ANSSI BP-028" Style="{StaticResource H2}"/>
                 <StackPanel Orientation="Horizontal" Margin="0,10,0,0">
                   <Button x:Name="BtnPresetAnssi1" Style="{StaticResource BtnBase}" Content="Minimal"
-                          ToolTip="Postes exposés à Internet avec données peu sensibles."/>
-                  <Button x:Name="BtnPresetAnssi2" Style="{StaticResource BtnBase}" Content="Intermédiaire" Margin="10,0,0,0"
-                          ToolTip="Postes en réseau d'entreprise standard."/>
-                  <Button x:Name="BtnPresetAnssi3" Style="{StaticResource BtnBase}" Content="Élevé" Margin="10,0,0,0"
-                          ToolTip="Données sensibles : RH, finance, R&amp;D."/>
-                  <Button x:Name="BtnPresetAnssi4" Style="{StaticResource BtnBase}" Content="Renforcé" Margin="10,0,0,0"
-                          ToolTip="OIV, défense. Mesures les plus strictes."/>
+                          ToolTip="Postes expos&#233;s &#224; Internet avec donn&#233;es peu sensibles."/>
+                  <Button x:Name="BtnPresetAnssi2" Style="{StaticResource BtnBase}" Content="Interm&#233;diaire" Margin="10,0,0,0"
+                          ToolTip="Postes en r&#233;seau d'entreprise standard."/>
+                  <Button x:Name="BtnPresetAnssi3" Style="{StaticResource BtnBase}" Content="&#201;lev&#233;" Margin="10,0,0,0"
+                          ToolTip="Donn&#233;es sensibles : RH, finance, R&amp;D."/>
+                  <Button x:Name="BtnPresetAnssi4" Style="{StaticResource BtnBase}" Content="Renforc&#233;" Margin="10,0,0,0"
+                          ToolTip="OIV, d&#233;fense. Mesures les plus strictes."/>
                 </StackPanel>
               </StackPanel>
             </Border>
 
             <Border Style="{StaticResource Card}">
               <StackPanel>
-                <TextBlock Text="Déploiement automatisé" Style="{StaticResource H2}"/>
+                <TextBlock Text="D&#233;ploiement automatis&#233;" Style="{StaticResource H2}"/>
                 <TextBlock Style="{StaticResource Muted}" Margin="0,8,0,0" FontSize="12"
-                           Text="Pour Intune / GPO / SCCM, le même fichier s'exécute sans interface :"/>
+                           Text="Pour Intune / GPO / SCCM, le m&#234;me fichier s'ex&#233;cute sans interface :"/>
                 <Border Background="#101114" BorderBrush="{StaticResource BorderCol}" BorderThickness="1"
                         CornerRadius="4" Padding="12,10" Margin="0,10,0,0">
                   <TextBlock x:Name="LblCliHint" FontFamily="Consolas" FontSize="12" Foreground="#9AA0AA"/>
@@ -1887,12 +1858,104 @@ $inputXAML = @'
               <StackPanel>
                 <TextBlock Text="Avertissement" Style="{StaticResource H2}" Foreground="#F59E0B"/>
                 <TextBlock Style="{StaticResource Muted}" Margin="0,8,0,0" FontSize="12"
-                           Text="Win11-Baseline applique un sous-ensemble représentatif de mesures inspirées de CIS et d'ANSSI BP-028. Ce n'est ni une implémentation exhaustive, ni une certification de conformité. Testez sur un poste pilote ; en production, privilégiez GPO ou Microsoft Intune."/>
+                           Text="Win11-Baseline applique un sous-ensemble repr&#233;sentatif de mesures inspir&#233;es de CIS et d'ANSSI BP-028. Ce n'est ni une impl&#233;mentation exhaustive, ni une certification de conformit&#233;. Testez sur un poste pilote ; en production, privil&#233;giez GPO ou Microsoft Intune."/>
               </StackPanel>
             </Border>
 
           </StackPanel>
         </ScrollViewer>
+      </TabItem>
+
+      <TabItem Style="{StaticResource SideSubTab}" Header="Socle">
+        <Grid Background="{StaticResource BgWindow}">
+          <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/></Grid.RowDefinitions>
+          <Border Grid.Row="0" Padding="22,16,22,10" Background="{StaticResource BgWindow}">
+            <Grid>
+              <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+              <StackPanel>
+                <TextBlock Text="Socle de s&#233;curit&#233;" Style="{StaticResource H2}"/>
+                <TextBlock Style="{StaticResource Muted}" FontSize="12"
+                           Text="Mesures &#224; faible impact fonctionnel. Base de CIS Level 1 et d'ANSSI Minimal."/>
+              </StackPanel>
+              <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
+                <Button x:Name="BtnAllSocle"  Style="{StaticResource BtnSmall}" Content="Tout s&#233;lectionner"/>
+                <Button x:Name="BtnNoneSocle" Style="{StaticResource BtnSmall}" Content="Tout d&#233;s&#233;lectionner" Margin="8,0,0,0"/>
+              </StackPanel>
+            </Grid>
+          </Border>
+          <ScrollViewer Grid.Row="1" VerticalScrollBarVisibility="Auto">
+            <StackPanel x:Name="PanelSocle" Margin="22,0,22,22"/>
+          </ScrollViewer>
+        </Grid>
+      </TabItem>
+
+      <TabItem Style="{StaticResource SideSubTab}" Header="Interm&#233;diaire">
+        <Grid Background="{StaticResource BgWindow}">
+          <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/></Grid.RowDefinitions>
+          <Border Grid.Row="0" Padding="22,16,22,10">
+            <Grid>
+              <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+              <StackPanel>
+                <TextBlock Text="Renforcement interm&#233;diaire" Style="{StaticResource H2}"/>
+                <TextBlock Style="{StaticResource Muted}" FontSize="12"
+                           Text="R&#233;seau d'entreprise standard. CIS L1 &#233;tendu / ANSSI Interm&#233;diaire."/>
+              </StackPanel>
+              <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
+                <Button x:Name="BtnAllInter"  Style="{StaticResource BtnSmall}" Content="Tout s&#233;lectionner"/>
+                <Button x:Name="BtnNoneInter" Style="{StaticResource BtnSmall}" Content="Tout d&#233;s&#233;lectionner" Margin="8,0,0,0"/>
+              </StackPanel>
+            </Grid>
+          </Border>
+          <ScrollViewer Grid.Row="1" VerticalScrollBarVisibility="Auto">
+            <StackPanel x:Name="PanelIntermediaire" Margin="22,0,22,22"/>
+          </ScrollViewer>
+        </Grid>
+      </TabItem>
+
+      <TabItem Style="{StaticResource SideSubTab}" Header="&#201;lev&#233;">
+        <Grid Background="{StaticResource BgWindow}">
+          <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/></Grid.RowDefinitions>
+          <Border Grid.Row="0" Padding="22,16,22,10">
+            <Grid>
+              <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+              <StackPanel>
+                <TextBlock Text="Renforcement &#233;lev&#233;" Style="{StaticResource H2}"/>
+                <TextBlock Style="{StaticResource Muted}" FontSize="12"
+                           Text="Donn&#233;es sensibles. CIS Level 2 / ANSSI &#201;lev&#233;. V&#233;rifiez les mesures marqu&#233;es."/>
+              </StackPanel>
+              <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
+                <Button x:Name="BtnAllEleve"  Style="{StaticResource BtnSmall}" Content="Tout s&#233;lectionner"/>
+                <Button x:Name="BtnNoneEleve" Style="{StaticResource BtnSmall}" Content="Tout d&#233;s&#233;lectionner" Margin="8,0,0,0"/>
+              </StackPanel>
+            </Grid>
+          </Border>
+          <ScrollViewer Grid.Row="1" VerticalScrollBarVisibility="Auto">
+            <StackPanel x:Name="PanelEleve" Margin="22,0,22,22"/>
+          </ScrollViewer>
+        </Grid>
+      </TabItem>
+
+      <TabItem Style="{StaticResource SideSubTab}" Header="Renforc&#233;">
+        <Grid Background="{StaticResource BgWindow}">
+          <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/></Grid.RowDefinitions>
+          <Border Grid.Row="0" Padding="22,16,22,10">
+            <Grid>
+              <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+              <StackPanel>
+                <TextBlock Text="Renforcement maximal" Style="{StaticResource H2}"/>
+                <TextBlock Style="{StaticResource Muted}" FontSize="12"
+                           Text="ANSSI Renforc&#233;. Mesures les plus strictes : testez imp&#233;rativement sur un poste pilote."/>
+              </StackPanel>
+              <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
+                <Button x:Name="BtnAllRenforce"  Style="{StaticResource BtnSmall}" Content="Tout s&#233;lectionner"/>
+                <Button x:Name="BtnNoneRenforce" Style="{StaticResource BtnSmall}" Content="Tout d&#233;s&#233;lectionner" Margin="8,0,0,0"/>
+              </StackPanel>
+            </Grid>
+          </Border>
+          <ScrollViewer Grid.Row="1" VerticalScrollBarVisibility="Auto">
+            <StackPanel x:Name="PanelRenforce" Margin="22,0,22,22"/>
+          </ScrollViewer>
+        </Grid>
       </TabItem>
 
     </TabControl>
@@ -1943,10 +2006,10 @@ $inputXAML = @'
           <ColumnDefinition Width="Auto"/>
         </Grid.ColumnDefinitions>
         <TextBlock Grid.Column="0" x:Name="LblSelected" VerticalAlignment="Center"
-                   Style="{StaticResource Muted}" Text="0 action sélectionnée"/>
+                   Style="{StaticResource Muted}" Text="0 action s&#233;lectionn&#233;e"/>
         <StackPanel Grid.Column="1" Orientation="Horizontal">
-          <Button x:Name="BtnUndo" Style="{StaticResource BtnBase}" Content="Annuler la sélection"
-                  ToolTip="Remet les mesures cochées à leur valeur par défaut Windows, lorsqu'une annulation est définie."/>
+          <Button x:Name="BtnUndo" Style="{StaticResource BtnBase}" Content="Annuler la s&#233;lection"
+                  ToolTip="Remet les mesures coch&#233;es &#224; leur valeur par d&#233;faut Windows, lorsqu'une annulation est d&#233;finie."/>
           <Button x:Name="BtnApply" Style="{StaticResource BtnAccent}" Content="Appliquer la baseline" Margin="12,0,0,0"/>
         </StackPanel>
       </Grid>
@@ -2067,8 +2130,8 @@ function Add-W11BUIActionRow {
 function Update-W11BUISelectionCount {
     <# .SYNOPSIS Rafraichit le compteur du pied de page. #>
     $n = @($sync.Checkboxes.Values | Where-Object { $_.IsChecked }).Count
-    $mot = if ($n -gt 1) { 'actions sélectionnées' } else { 'action sélectionnée' }
-    $sync.LblSelected.Text = "$n $mot"
+    $mot = if ($n -gt 1) { 'actions s&#233;lectionn&#233;es' } else { 'action s&#233;lectionn&#233;e' }
+    $sync.LblSelected.Text = Get-W11BText "$n $mot"
 }
 
 function Get-W11BUISelectedIds {
@@ -2106,7 +2169,7 @@ function Set-W11BUIPreset {
     # Le point de restauration est fortement recommande avec un prereglage.
     if ($sync.Checkboxes['SYS-RestorePoint']) { $sync.Checkboxes['SYS-RestorePoint'].IsChecked = $true }
     Update-W11BUISelectionCount
-    Write-W11BLog -Level 'INFO' -Message "Préréglage '$Name' chargé : $((Get-W11BPresetIds -Name $Name).Count) mesure(s) cochée(s)."
+    Write-W11BLog -Level 'INFO' -Message "Pr&#233;r&#233;glage '$Name' charg&#233; : $((Get-W11BPresetIds -Name $Name).Count) mesure(s) coch&#233;e(s)."
 }
 
 # =====================================================================
@@ -2128,7 +2191,7 @@ function Get-W11BUIFormData {
     # --- Configuration IP --------------------------------------------
     if ($sync.Checkboxes['NET-IPConfig'].IsChecked) {
         $adapter = $sync.CmbAdapter.SelectedItem
-        if (-not $adapter) { return @{ Error = "Sélectionnez une carte réseau." } }
+        if (-not $adapter) { return @{ Error = "S&#233;lectionnez une carte r&#233;seau." } }
         $mode = if ($sync.RbDhcp.IsChecked) { 'DHCP' } else { 'Static' }
         $entry = @{ InterfaceAlias = [string]$adapter; Mode = $mode }
         if ($mode -eq 'Static') {
@@ -2156,7 +2219,7 @@ function Get-W11BUIFormData {
         $dom  = $sync.TxtDomain.Text.Trim()
         $user = $sync.TxtJoinUser.Text.Trim()
         if (-not $dom)  { return @{ Error = "Nom du domaine manquant." } }
-        if (-not $user) { return @{ Error = "Compte autorisé à joindre le domaine manquant." } }
+        if (-not $user) { return @{ Error = "Compte autoris&#233; &#224; joindre le domaine manquant." } }
         if ($sync.PwdJoin.SecurePassword.Length -eq 0) { return @{ Error = "Mot de passe du compte de jonction manquant." } }
         $entry = @{
             DomainName = $dom
@@ -2201,18 +2264,16 @@ function Start-W11BUIRun {
 
     $ids = Get-W11BUISelectedIds
     if ($ids.Count -eq 0) {
-        [System.Windows.MessageBox]::Show(
-            "Aucune action sélectionnée.`n`nCochez au moins une mesure, ou chargez un préréglage depuis l'onglet Préréglages.",
-            'Win11-Baseline', 'OK', 'Warning') | Out-Null
+        Show-W11BMessage -Icon 'Warning' -Text `
+            "Aucune action s&#233;lectionn&#233;e.`n`nCochez au moins une mesure, ou chargez un pr&#233;r&#233;glage depuis l'onglet Pr&#233;r&#233;glages." | Out-Null
         return
     }
 
     if ($Undo) {
         $reversibles = @($ids | ForEach-Object { Get-W11BAction -Id $_ } | Where-Object { $_.Undo })
         if ($reversibles.Count -eq 0) {
-            [System.Windows.MessageBox]::Show(
-                "Aucune des actions sélectionnées ne dispose d'une annulation automatique.`n`nLes actions de type formulaire (IP, renommage, jonction de domaine, mappage) doivent être annulées manuellement.",
-                'Win11-Baseline', 'OK', 'Warning') | Out-Null
+            Show-W11BMessage -Icon 'Warning' -Text `
+                "Aucune des actions s&#233;lectionn&#233;es ne dispose d'une annulation automatique.`n`nLes actions de type formulaire (IP, renommage, jonction de domaine, mappage) doivent &#234;tre annul&#233;es manuellement." | Out-Null
             return
         }
         $ids = @($reversibles | ForEach-Object { $_.Id })
@@ -2223,7 +2284,7 @@ function Start-W11BUIRun {
     if (-not $Undo) {
         $form = Get-W11BUIFormData
         if ($form.Error) {
-            [System.Windows.MessageBox]::Show($form.Error, 'Win11-Baseline - saisie incomplète', 'OK', 'Warning') | Out-Null
+            Show-W11BMessage -Text $form.Error -Title 'Win11-Baseline - saisie incompl&#232;te' -Icon 'Warning' | Out-Null
             return
         }
         $sync.FormData = $form
@@ -2231,7 +2292,7 @@ function Start-W11BUIRun {
         # nouveau nom, on retire donc l'action de renommage isolee.
         if ($sync.FormData['SYS-DomainJoin'] -and $sync.FormData['SYS-DomainJoin'].NewName) {
             $ids = @($ids | Where-Object { $_ -ne 'SYS-Rename' })
-            Write-W11BLog -Level 'INFO' -Message "Renommage intégré à la jonction de domaine (Add-Computer -NewName)."
+            Write-W11BLog -Level 'INFO' -Message "Renommage int&#233;gr&#233; &#224; la jonction de domaine (Add-Computer -NewName)."
         }
     }
 
@@ -2240,11 +2301,11 @@ function Start-W11BUIRun {
     $risky = @($ids | ForEach-Object { Get-W11BAction -Id $_ } | Where-Object { $_.Risk -eq 'Eleve' })
     $msg   = "$verbe $($ids.Count) action(s) sur ce poste ?"
     if ($risky.Count -gt 0) {
-        $msg += "`n`nMesures à RISQUE FONCTIONNEL ÉLEVÉ sélectionnées :`n"
+        $msg += "`n`nMesures &#224; RISQUE FONCTIONNEL &#201;LEV&#201; s&#233;lectionn&#233;es :`n"
         $msg += ($risky | ForEach-Object { "  - $($_.Name)" }) -join "`n"
-        $msg += "`n`nTestez sur un poste pilote avant tout déploiement."
+        $msg += "`n`nTestez sur un poste pilote avant tout d&#233;ploiement."
     }
-    if ([System.Windows.MessageBox]::Show($msg, 'Win11-Baseline - confirmation', 'YesNo', 'Warning') -ne 'Yes') { return }
+    if ((Show-W11BMessage -Text $msg -Title 'Win11-Baseline - confirmation' -Button 'YesNo' -Icon 'Warning') -ne 'Yes') { return }
 
     # --- Bascule de l'interface en mode "execution" -------------------
     $sync.Cancelled     = $false
@@ -2257,7 +2318,7 @@ function Start-W11BUIRun {
     $sync.BtnUndo.IsEnabled  = $false
     $sync.Nav.IsEnabled      = $false
     $sync.Bar.Value          = 0
-    $sync.LblStep.Text       = 'Démarrage...'
+    $sync.LblStep.Text       = Get-W11BText 'D&#233;marrage...'
     $sync.LblCount.Text      = "0 / $($ids.Count)"
 
     Start-W11BRunspace -ScriptBlock {
@@ -2265,7 +2326,7 @@ function Start-W11BUIRun {
         try {
             Invoke-W11BSelection -Ids $Ids -Undo:$Undo
         } catch {
-            Write-W11BLog -Level 'ERR' -Message "Interruption de l'exécution : $($_.Exception.Message)"
+            Write-W11BLog -Level 'ERR' -Message "Interruption de l'ex&#233;cution : $($_.Exception.Message)"
         } finally {
             # Garantit que l'interface est toujours rendue a l'utilisateur,
             # meme si le moteur s'est arrete sur une erreur imprevue.
@@ -2286,26 +2347,25 @@ function Complete-W11BUIRun {
     $ok = @($sync.Results | Where-Object { $_.Status -eq 'OK' }).Count
     $ko = @($sync.Results | Where-Object { $_.Status -eq 'Error' }).Count
     $sk = @($sync.Results | Where-Object { $_.Status -eq 'Skipped' }).Count
-    $sync.LblStep.Text = "Terminé : $ok réussie(s), $ko échec(s)"
+    $sync.LblStep.Text = Get-W11BText "Termin&#233; : $ok r&#233;ussie(s), $ko &#233;chec(s)"
 
-    $resume = "Exécution terminée.`n`n  Réussies : $ok`n  Échecs   : $ko`n  Ignorées : $sk"
+    $resume = "Ex&#233;cution termin&#233;e.`n`n  R&#233;ussies : $ok`n  &#201;checs   : $ko`n  Ignor&#233;es : $sk"
     if ($ko -gt 0) {
-        $resume += "`n`nDétail des échecs :`n"
+        $resume += "`n`nD&#233;tail des &#233;checs :`n"
         $resume += (@($sync.Results | Where-Object { $_.Status -eq 'Error' } |
                       ForEach-Object { "  - $($_.Id) : $($_.Message)" }) -join "`n")
     }
     $resume += "`n`nOuvrir le fichier de journal ?`n$($sync.LogFile)"
 
-    if ([System.Windows.MessageBox]::Show($resume, 'Win11-Baseline - résumé', 'YesNo', 'Information') -eq 'Yes') {
+    if ((Show-W11BMessage -Text $resume -Title 'Win11-Baseline - r&#233;sum&#233;' -Button 'YesNo') -eq 'Yes') {
         try { Start-Process notepad.exe -ArgumentList "`"$($sync.LogFile)`"" } catch { }
     }
 
     if ($sync.NeedReboot) {
-        $r = [System.Windows.MessageBox]::Show(
-            "Un REDÉMARRAGE est nécessaire pour appliquer certains changements (nom du poste, jonction de domaine, LSASS PPL, VBS...).`n`nRedémarrer maintenant ?",
-            'Win11-Baseline - redémarrage requis', 'YesNo', 'Warning')
+        $r = Show-W11BMessage -Button 'YesNo' -Icon 'Warning' -Title 'Win11-Baseline - red&#233;marrage requis' -Text `
+            "Un RED&#201;MARRAGE est n&#233;cessaire pour appliquer certains changements (nom du poste, jonction de domaine, LSASS PPL, VBS...).`n`nRed&#233;marrer maintenant ?"
         if ($r -eq 'Yes') {
-            Write-W11BLog -Level 'WARN' -Message 'Redémarrage demandé par l''utilisateur.'
+            Write-W11BLog -Level 'WARN' -Message 'Red&#233;marrage demand&#233; par l''utilisateur.'
             Restart-Computer -Force
         }
     }
@@ -2359,7 +2419,7 @@ function Start-W11BGui {
         $sync.BdgAdmin.Background  = $conv.ConvertFromString('#14331F')
         $sync.BdgAdmin.BorderBrush = $conv.ConvertFromString('#22C55E')
     } else {
-        $sync.LblAdmin.Text       = 'NON eleve - actions limitees'
+        $sync.LblAdmin.Text       = Get-W11BText 'NON &#233;lev&#233; - actions limit&#233;es'
         $sync.LblAdmin.Foreground = $conv.ConvertFromString('#EF4444')
         $sync.BdgAdmin.Background  = $conv.ConvertFromString('#3A1616')
         $sync.BdgAdmin.BorderBrush = $conv.ConvertFromString('#EF4444')
@@ -2440,7 +2500,7 @@ function Start-W11BGui {
     # --- Boutons : journal -----------------------------------------------
     $sync.BtnOpenLog.Add_Click({
         try { Start-Process notepad.exe -ArgumentList "`"$($sync.LogFile)`"" }
-        catch { [System.Windows.MessageBox]::Show("Impossible d'ouvrir le journal :`n$($sync.LogFile)", 'Win11-Baseline', 'OK', 'Warning') | Out-Null }
+        catch { Show-W11BMessage -Icon 'Warning' -Text "Impossible d'ouvrir le journal :`n$($sync.LogFile)" | Out-Null }
     })
     $sync.BtnClearLog.Add_Click({ $sync.LogBox.Clear() })
 
@@ -2451,10 +2511,10 @@ function Start-W11BGui {
         $sync.BtnDiscoverAD.IsEnabled = $false
         $sync.ADShares.Clear()
         $sync.ADSharesReady = $false
-        Write-W11BLog -Level 'INFO' -Message 'Recherche des partages publiés dans l''Active Directory...'
+        Write-W11BLog -Level 'INFO' -Message 'Recherche des partages publi&#233;s dans l''Active Directory...'
         Start-W11BRunspace -ScriptBlock {
             foreach ($s in @(Get-W11BADPublishedShares)) { $sync.ADShares.Add($s) }
-            Write-W11BLog -Level 'INFO' -Message "$($sync.ADShares.Count) partage(s) publié(s) trouvé(s)."
+            Write-W11BLog -Level 'INFO' -Message "$($sync.ADShares.Count) partage(s) publi&#233;(s) trouv&#233;(s)."
             $sync.ADSharesReady = $true
         } | Out-Null
     })
@@ -2486,7 +2546,7 @@ function Start-W11BGui {
         if ($sync.Running -and $sync.ProgressTotal -gt 0) {
             $sync.Bar.Value     = [math]::Min(100, ($sync.Progress / $sync.ProgressTotal) * 100)
             $sync.LblCount.Text = "$($sync.Progress) / $($sync.ProgressTotal)  -  $($sync.ProgressTotal - $sync.Progress) restante(s)"
-            $sync.LblStep.Text  = $sync.CurrentLabel
+            $sync.LblStep.Text  = Get-W11BText $sync.CurrentLabel
         }
 
         if ($sync.ADSharesReady) {
@@ -2504,9 +2564,8 @@ function Start-W11BGui {
     # --- Fermeture : confirmation si une execution est en cours ------------
     $sync.Form.Add_Closing({
         if ($sync.Running) {
-            $r = [System.Windows.MessageBox]::Show(
-                "Une exécution est en cours.`n`nFermer maintenant peut laisser le poste dans un état partiellement configuré.`n`nFermer quand même ?",
-                'Win11-Baseline', 'YesNo', 'Warning')
+            $r = Show-W11BMessage -Button 'YesNo' -Icon 'Warning' -Text `
+                "Une ex&#233;cution est en cours.`n`nFermer maintenant peut laisser le poste dans un &#233;tat partiellement configur&#233;.`n`nFermer quand m&#234;me ?"
             if ($r -ne 'Yes') { $args[1].Cancel = $true; return }
             $sync.Cancelled = $true
         }
