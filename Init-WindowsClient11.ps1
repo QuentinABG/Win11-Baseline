@@ -1,4 +1,4 @@
-﻿#Requires -Version 5.1
+#Requires -Version 5.1
 # =====================================================================
 # SCRIPT D'INITIALISATION / DURCISSEMENT POSTE CLIENT WINDOWS 11
 # (MODE 100% INTERACTIF)
@@ -38,8 +38,157 @@
 # =====================================================================
 
 # =====================================================================
+#        BOOTSTRAP - COMPATIBILITE "irm ... | iex" (EXECUTION EN MEMOIRE)
+# ---------------------------------------------------------------------
+# Ce script peut etre lance de DEUX facons :
+#
+#   A) Depuis un FICHIER .ps1 present sur le disque (double-clic sur le
+#      lanceur .cmd, powershell -File ..., etc.)
+#      -> $PSCommandPath et $PSScriptRoot sont renseignes.
+#
+#   B) Directement EN MEMOIRE, sans aucun fichier, via la commande unique :
+#         irm https://raw.githubusercontent.com/QuentinABG/Win11-Baseline/main/Init-WindowsClient11.ps1 | iex
+#      -> Invoke-RestMethod (irm) telecharge le TEXTE du script, puis
+#         Invoke-Expression (iex) l'execute dans le processus courant.
+#         Dans ce cas $PSCommandPath, $PSScriptRoot et
+#         $MyInvocation.MyCommand.Path sont VIDES : toute logique qui
+#         repose sur un chemin de fichier doit avoir un plan B.
+#
+# Les trois variables ci-dessous centralisent cette detection. Le reste du
+# script utilise $script:SelfPath / $script:IsInMemory / $script:RawUrl
+# plutot que $PSScriptRoot ou $MyInvocation.MyCommand.Path.
+# =====================================================================
+
+# --- URL "brute" (raw) du present script sur GitHub -------------------
+# Sert a deux choses :
+#   1. relancer le script en mode administrateur quand il tourne en memoire
+#      (on re-execute exactement la meme commande irm | iex) ;
+#   2. deposer une copie locale pour la reprise apres redemarrage.
+# Si vous forkez le depot ou changez le nom du fichier, c'est LA SEULE
+# ligne a adapter.
+$script:RawUrl = 'https://raw.githubusercontent.com/QuentinABG/Win11-Baseline/main/Init-WindowsClient11.ps1'
+
+# --- TLS 1.2 explicite ------------------------------------------------
+# Windows PowerShell 5.1 peut encore negocier TLS 1.0/1.1 par defaut sur
+# certains postes : Invoke-RestMethod vers GitHub echouerait alors avec une
+# erreur "Request was aborted / Could not create SSL/TLS secure channel".
+try {
+    [Net.ServicePointManager]::SecurityProtocol = `
+        [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
+} catch { }
+
+# --- Mode de langage --------------------------------------------------
+# Sous AppLocker / WDAC, PowerShell bascule en "ConstrainedLanguage" : un
+# script telecharge en memoire ne peut alors pas s'executer correctement.
+# On le signale immediatement plutot que d'echouer en cours de route.
+if ($ExecutionContext.SessionState.LanguageMode -ne 'FullLanguage') {
+    Write-Host "Ce poste restreint PowerShell (LanguageMode = $($ExecutionContext.SessionState.LanguageMode))." -ForegroundColor Red
+    Write-Host "Win11-Baseline ne peut pas s'executer dans ce mode. Voyez l'administrateur du parc." -ForegroundColor Red
+    return
+}
+
+# --- Detection : fichier sur disque ou execution en memoire ? ---------
+# IMPORTANT : ces lignes doivent rester au niveau SCRIPT (pas dans une
+# fonction), sinon $MyInvocation designerait l'appel de la fonction.
+$script:SelfPath = $null
+if     ($PSCommandPath)               { $script:SelfPath = $PSCommandPath }
+elseif ($MyInvocation.MyCommand.Path) { $script:SelfPath = $MyInvocation.MyCommand.Path }
+$script:IsInMemory = [string]::IsNullOrWhiteSpace($script:SelfPath)
+
+# =====================================================================
 #                       FONCTIONS UTILITAIRES
 # =====================================================================
+
+# --- Construit la commande PowerShell capable de RELANCER ce script ---
+# Deux cas :
+#   * fichier sur disque -> on rappelle ce fichier ;
+#   * execution en memoire -> on re-telecharge et on re-execute la MEME
+#     commande irm | iex, ce qui preserve le fonctionnement "une ligne"
+#     jusque dans le processus eleve.
+# La chaine retournee ne contient QUE des apostrophes simples : elle est
+# ensuite encadree par des guillemets doubles dans -Command "...".
+function Get-SelfRelaunchCommand {
+    if ($script:IsInMemory) {
+        return "[Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12; & ([ScriptBlock]::Create((irm '$script:RawUrl')))"
+    } else {
+        return "& { & '$script:SelfPath' }"
+    }
+}
+
+# --- Depose une copie locale du script dans %ProgramData% -------------
+# Utilisee par la tache de reprise apres redemarrage : disposer d'un VRAI
+# fichier .ps1 evite de dependre d'Internet au moment du redemarrage et
+# fige la version utilisee pendant tout le parcours.
+# Retourne le chemin de la copie, ou $null en cas d'echec.
+function Save-SelfCopy {
+    $dest = Join-Path $script:StateDir 'Init-WindowsClient11.ps1'
+    try {
+        if (-not (Test-Path $script:StateDir)) {
+            New-Item -ItemType Directory -Path $script:StateDir -Force | Out-Null
+        }
+        if ($script:IsInMemory) {
+            Invoke-WebRequest -Uri $script:RawUrl -OutFile $dest -UseBasicParsing -ErrorAction Stop
+        } else {
+            Copy-Item -Path $script:SelfPath -Destination $dest -Force -ErrorAction Stop
+        }
+        # Mark of the Web : evite un blocage si la strategie repasse en RemoteSigned
+        Unblock-File -Path $dest -ErrorAction SilentlyContinue
+        return $dest
+    } catch {
+        return $null
+    }
+}
+
+# --- Centre un texte sur une largeur donnee (encadre d'accueil) -------
+function Format-Centered {
+    param([string]$Text, [int]$Width)
+    if ($Text.Length -ge $Width) { return $Text.Substring(0, $Width) }
+    $left = [math]::Floor(($Width - $Text.Length) / 2)
+    return (" " * $left) + $Text + (" " * ($Width - $Text.Length - $left))
+}
+
+# --- ECRAN D'ACCUEIL --------------------------------------------------
+# Encadre colore + menu. Boucle tant que la saisie n'est pas 1 ou 2.
+# Retourne $true  -> lancer le parcours d'initialisation
+#          $false -> quitter
+function Show-WelcomeMenu {
+    $w = 62
+    while ($true) {
+        Clear-Host
+        Write-Host ""
+        Write-Host ("  +" + ("=" * $w) + "+") -ForegroundColor Cyan
+        Write-Host ("  |" + (Format-Centered "" $w) + "|") -ForegroundColor Cyan
+
+        Write-Host "  |" -ForegroundColor Cyan -NoNewline
+        Write-Host (Format-Centered "Bienvenue sur Win11-Baseline" $w) -ForegroundColor White -NoNewline
+        Write-Host "|" -ForegroundColor Cyan
+
+        Write-Host "  |" -ForegroundColor Cyan -NoNewline
+        Write-Host (Format-Centered "Initialisation et durcissement d'un poste Windows 11" $w) -ForegroundColor Gray -NoNewline
+        Write-Host "|" -ForegroundColor Cyan
+
+        Write-Host ("  |" + (Format-Centered "" $w) + "|") -ForegroundColor Cyan
+        Write-Host ("  +" + ("=" * $w) + "+") -ForegroundColor Cyan
+        Write-Host ""
+
+        $mode = if ($script:IsInMemory) { "en memoire (irm | iex)" } else { "fichier local" }
+        Write-Host "   Poste : $env:COMPUTERNAME   |   Utilisateur : $env:USERNAME" -ForegroundColor DarkGray
+        Write-Host "   Execution : $mode   |   Droits : administrateur" -ForegroundColor DarkGray
+        Write-Host ""
+        Write-Host "   [1] " -ForegroundColor Green -NoNewline
+        Write-Host "Lancer l'initialisation du poste (4 etapes)"
+        Write-Host "   [2] " -ForegroundColor Red   -NoNewline
+        Write-Host "Quitter"
+        Write-Host ""
+
+        $choice = (Read-Host "   -> Votre choix (1/2)").Trim()
+        if ($choice -eq '1') { return $true }
+        if ($choice -eq '2') { return $false }
+
+        Write-Host "   -> Choix invalide : tapez 1 ou 2." -ForegroundColor Red
+        Start-Sleep -Seconds 1
+    }
+}
 
 # --- Lecture stricte d'une reponse Oui/Non ---
 function Read-YesNo {
@@ -185,11 +334,19 @@ function New-InitState {
 }
 
 # --- Programme la reprise automatique du script a la prochaine ouverture de session ---
+# Compatible execution en memoire : comme il n'existe alors AUCUN fichier .ps1
+# a passer a -File, on depose d'abord une copie locale dans %ProgramData%
+# (plan A, fonctionne meme sans reseau au redemarrage). Si cette copie echoue,
+# on retombe sur un -Command qui re-joue la commande irm | iex (plan B).
 function Register-ResumeTask {
-    param([Parameter(Mandatory)][string]$ScriptPath)
     try {
-        $action  = New-ScheduledTaskAction -Execute "powershell.exe" `
-                        -Argument "-NoProfile -ExecutionPolicy Bypass -File `"$ScriptPath`""
+        $localCopy = Save-SelfCopy
+        if ($localCopy) {
+            $taskArgs = "-NoProfile -ExecutionPolicy Bypass -File `"$localCopy`""
+        } else {
+            $taskArgs = "-NoProfile -ExecutionPolicy Bypass -Command `"$(Get-SelfRelaunchCommand)`""
+        }
+        $action  = New-ScheduledTaskAction -Execute "powershell.exe" -Argument $taskArgs
         $trigger = New-ScheduledTaskTrigger -AtLogOn
         $principal = New-ScheduledTaskPrincipal -UserId "$env:USERDOMAIN\$env:USERNAME" `
                         -RunLevel Highest -LogonType Interactive
@@ -210,6 +367,11 @@ function Unregister-ResumeTask {
 # --- Efface l'etat + supprime la tache de reprise (fin de parcours) ---
 function Clear-InitState {
     try { if (Test-Path $script:StateFile) { Remove-Item $script:StateFile -Force -ErrorAction SilentlyContinue } } catch {}
+    # Copie locale eventuellement deposee pour la reprise (mode memoire)
+    try {
+        $cached = Join-Path $script:StateDir 'Init-WindowsClient11.ps1'
+        if (Test-Path $cached) { Remove-Item $cached -Force -ErrorAction SilentlyContinue }
+    } catch {}
     Unregister-ResumeTask
 }
 
@@ -740,7 +902,12 @@ function Invoke-Hardening {
 }
 
 # =====================================================================
-# 1. AUTO-ELEVATION (relance le script en Admin si necessaire)
+# 1. AUTO-ELEVATION (relance en Admin, y compris en execution "en memoire")
+# ---------------------------------------------------------------------
+# Point cle du pattern irm | iex : on NE PEUT PAS relancer avec -File
+# puisqu'aucun fichier .ps1 n'existe. On relance donc avec -Command en
+# re-jouant la meme commande de telechargement (voir Get-SelfRelaunchCommand).
+# Le processus eleve repart ainsi de zero, toujours en memoire.
 # =====================================================================
 $myWindowsID = [System.Security.Principal.WindowsIdentity]::GetCurrent()
 $myPrincipal = New-Object System.Security.Principal.WindowsPrincipal($myWindowsID)
@@ -748,25 +915,17 @@ $adminRole   = [System.Security.Principal.WindowsBuiltInRole]::Administrator
 
 if (-not $myPrincipal.IsInRole($adminRole)) {
 
-    $scriptPath = $MyInvocation.MyCommand.Path
-    if ([string]::IsNullOrWhiteSpace($scriptPath)) {
-        Write-Host "Ce script doit etre lance depuis un fichier .ps1 enregistre sur le disque." -ForegroundColor Red
-        Write-Host "Faites un clic droit sur le fichier -> 'Executer avec PowerShell'," -ForegroundColor Yellow
-        Write-Host "ou ouvrez PowerShell EN ADMINISTRATEUR puis lancez : .\Init-WindowsClient11.ps1" -ForegroundColor Yellow
-        Read-Host "`nAppuyez sur Entree pour fermer"
-        exit 1
-    }
-
     Write-Host "Droits administrateur requis : demande d'elevation (UAC)..." -ForegroundColor Yellow
     Write-Host "Une invite de controle de compte (UAC) va s'afficher : cliquez sur 'Oui'." -ForegroundColor Yellow
-    Write-Host "La suite s'ouvrira dans une NOUVELLE fenetre PowerShell (celle-ci se fermera)." -ForegroundColor Yellow
+    Write-Host "La suite s'ouvrira dans une NOUVELLE fenetre PowerShell." -ForegroundColor Yellow
+
+    # -ExecutionPolicy Bypass -NoProfile : conserves dans la relance.
+    # -NoExit : la fenetre elevee RESTE ouverte meme en cas d'erreur precoce,
+    #           afin de pouvoir lire le message au lieu d'une fermeture immediate.
+    $relaunchArgs = "-NoProfile -ExecutionPolicy Bypass -NoExit -Command `"$(Get-SelfRelaunchCommand)`""
 
     try {
-        # -NoExit : la fenetre elevee RESTE ouverte meme en cas d'erreur precoce,
-        #           afin de pouvoir lire le message au lieu d'une fermeture immediate.
-        Start-Process -FilePath "powershell.exe" `
-            -ArgumentList @('-NoExit', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', "`"$scriptPath`"") `
-            -Verb RunAs -ErrorAction Stop
+        Start-Process -FilePath "powershell.exe" -ArgumentList $relaunchArgs -Verb RunAs -ErrorAction Stop
     } catch {
         Write-Host "`n[ECHEC] Impossible d'obtenir les droits administrateur." -ForegroundColor Red
         Write-Host "Causes probables :" -ForegroundColor Red
@@ -775,18 +934,19 @@ if (-not $myPrincipal.IsInRole($adminRole)) {
         Write-Host "`nSolution : ouvrez une session (ou faites-vous elever) avec un compte" -ForegroundColor Yellow
         Write-Host "administrateur local, puis relancez ce script." -ForegroundColor Yellow
         Read-Host "`nAppuyez sur Entree pour fermer"
-        exit 1
+        return
     }
 
-    # L'instance elevee prend le relais dans la nouvelle fenetre : on laisse le temps
-    # de lire le message ci-dessus, puis on ferme cette fenetre non privilegiee.
+    # L'instance elevee prend le relais dans la nouvelle fenetre.
+    # 'return' (et non 'exit') : en mode irm | iex, le script s'execute DANS la
+    # console de l'utilisateur ; 'exit' fermerait cette console. 'return' rend
+    # simplement la main, et referme la fenetre quand on a ete lance avec -File.
     Start-Sleep -Seconds 1
-    exit 0
+    return
 }
 
-# Chemin du present script (contexte administrateur) : utilise plus bas pour
-# faciliter, en option, les futurs lancements directs du .ps1.
-$scriptSelfPath = $MyInvocation.MyCommand.Path
+# Chemin du present script (contexte administrateur), $null en execution memoire.
+$scriptSelfPath = $script:SelfPath
 
 # Confort visuel + journalisation
 if ($Host.Name -eq "ConsoleHost") {
@@ -794,6 +954,18 @@ if ($Host.Name -eq "ConsoleHost") {
 }
 $logPath = "$env:TEMP\Init-WindowsClient11.log"
 try { Start-Transcript -Path $logPath -Append -ErrorAction Stop | Out-Null } catch {}
+
+# =====================================================================
+# 2. ECRAN D'ACCUEIL
+# =====================================================================
+if (-not (Show-WelcomeMenu)) {
+    Write-Host ""
+    Write-Host "   Sortie a la demande de l'utilisateur. Aucun changement effectue." -ForegroundColor DarkGray
+    Write-Host ""
+    try { Stop-Transcript | Out-Null } catch {}
+    Start-Sleep -Seconds 1
+    return
+}
 
 # Variable globale : un seul redemarrage propose a la fin si necessaire
 $script:NeedReboot = $false
@@ -818,8 +990,11 @@ try {
     # proposer de regler durablement la strategie MACHINE sur 'RemoteSigned'
     # (posture standard, identique a Windows Server) pour que les PROCHAINS
     # lancements directs du .ps1 fonctionnent sans lanceur ni commande.
+    # NB : en execution "en memoire" (irm | iex), la strategie d'execution ne
+    # s'applique pas (aucun fichier .ps1 n'est charge) : la question n'a pas
+    # lieu d'etre, on saute donc entierement ce bloc.
     $lmPolicy = Get-ExecutionPolicy -Scope LocalMachine
-    if ($lmPolicy -in @('Restricted', 'Undefined', 'AllSigned')) {
+    if ((-not $script:IsInMemory) -and ($lmPolicy -in @('Restricted', 'Undefined', 'AllSigned'))) {
         Write-Host "`nStrategie d'execution actuelle du poste (machine) : $lmPolicy" -ForegroundColor Yellow
         Write-Host "Elle empeche le lancement direct (double-clic) des scripts .ps1." -ForegroundColor Yellow
         if (Read-YesNo "Autoriser durablement les scripts locaux signes/locaux (RemoteSigned) pour ne plus utiliser le lanceur ? (O/N)") {
@@ -1043,7 +1218,7 @@ try {
             if ($rc -eq '1') {
                 if (Read-YesNo "Confirmer le redemarrage maintenant ? (la reprise se fera automatiquement apres l'ouverture de session) (O/N)") {
                     Save-InitState $state
-                    if (Register-ResumeTask -ScriptPath $scriptSelfPath) {
+                    if (Register-ResumeTask) {
                         Write-Host "Reprise automatique programmee : le script se relancera apres l'ouverture de" -ForegroundColor Green
                         Write-Host "session et poursuivra directement au lecteur reseau puis au durcissement." -ForegroundColor Green
                     } else {

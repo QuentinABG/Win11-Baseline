@@ -4,6 +4,7 @@
 ![Platform](https://img.shields.io/badge/Windows-11-0078D6?logo=windows&logoColor=white)
 ![License](https://img.shields.io/badge/Licence-MIT-green)
 ![Status](https://img.shields.io/badge/Statut-Actif-brightgreen)
+![Quick Launch](https://img.shields.io/badge/Lancement-1%20commande%20PowerShell-5391FE?logo=powershell&logoColor=white)
 
 **Script PowerShell 100 % interactif d'initialisation et de durcissement d'un poste client Windows 11.**
 Configuration réseau, renommage et jonction au domaine, mappage de lecteurs réseau, puis durcissement de la sécurité selon les référentiels **CIS Benchmark** ou **ANSSI BP‑028** — avec reprise automatique après redémarrage.
@@ -12,8 +13,36 @@ Configuration réseau, renommage et jonction au domaine, mappage de lecteurs ré
 
 ---
 
+## ⚡ Quick Launch
+
+Ouvrez **PowerShell** (une console utilisateur standard suffit : l'élévation est automatique) et collez :
+
+```powershell
+irm https://raw.githubusercontent.com/QuentinABG/Win11-Baseline/main/Init-WindowsClient11.ps1 | iex
+```
+
+Rien à cloner, rien à décompresser : le script est téléchargé et exécuté **en mémoire**, demande les droits administrateur (UAC), puis affiche son écran d'accueil.
+
+<details>
+<summary>Que fait exactement cette commande ?</summary>
+
+| Étape | Détail |
+|-------|--------|
+| `irm` | `Invoke-RestMethod` télécharge le **texte** du script depuis GitHub (aucun fichier écrit sur le disque). |
+| `\| iex` | `Invoke-Expression` exécute ce texte dans la session PowerShell courante. La stratégie d'exécution (`Restricted`) ne s'applique pas : aucun fichier `.ps1` n'est chargé. |
+| Élévation | Si la console n'est pas administrateur, le script relance **la même commande** dans une fenêtre élevée (`Start-Process powershell -Verb RunAs` + `-Command`), en conservant `-NoProfile -ExecutionPolicy Bypass`. |
+| Accueil | Un menu s'affiche : `1` pour lancer l'initialisation, `2` pour quitter. |
+
+</details>
+
+> 💡 Version figée (recommandé en production) : remplacez `main` par un tag de release, par exemple
+> `.../Win11-Baseline/v1.0.0/Init-WindowsClient11.ps1`.
+
+---
+
 ## Sommaire
 
+- [Quick Launch](#-quick-launch)
 - [Fonctionnalités](#fonctionnalités)
 - [Prérequis](#prérequis)
 - [Installation](#installation)
@@ -52,7 +81,9 @@ Configuration réseau, renommage et jonction au domaine, mappage de lecteurs ré
 
 ## Installation
 
-Clonez le dépôt (ou téléchargez l'archive ZIP depuis GitHub) :
+**Aucune installation n'est nécessaire** avec le [Quick Launch](#-quick-launch) ci‑dessus.
+
+L'installation locale reste utile pour un poste **sans accès Internet**, un déploiement depuis une **clé USB**, ou pour travailler sur une version modifiée du script. Clonez le dépôt (ou téléchargez l'archive ZIP) :
 
 ```bash
 git clone https://github.com/QuentinABG/Win11-Baseline.git
@@ -61,7 +92,7 @@ git clone https://github.com/QuentinABG/Win11-Baseline.git
 Gardez **les deux fichiers dans le même dossier** :
 
 - `Init-WindowsClient11.ps1` — le script principal
-- `Lancer-Init-WindowsClient11.cmd` — le lanceur
+- `Lancer-Init-WindowsClient11.cmd` — le lanceur (double‑clic, contourne l'`ExecutionPolicy`)
 
 ---
 
@@ -69,7 +100,11 @@ Gardez **les deux fichiers dans le même dossier** :
 
 Windows 11 est en stratégie d'exécution `Restricted` par défaut : un double‑clic direct sur un `.ps1` est bloqué. Le **lanceur `.cmd`** contourne ce point le temps d'une exécution, sans modification permanente du poste.
 
-### Méthode recommandée
+### Méthode recommandée (en ligne)
+
+Collez la commande du [Quick Launch](#-quick-launch) dans une console PowerShell. Acceptez l'invite UAC, puis répondez aux questions.
+
+### Méthode locale (hors ligne / clé USB)
 
 **Double‑cliquez sur `Lancer-Init-WindowsClient11.cmd`.** Acceptez l'invite UAC, puis répondez aux questions.
 
