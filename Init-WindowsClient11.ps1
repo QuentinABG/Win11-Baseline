@@ -39,7 +39,7 @@
     &([scriptblock]::Create((irm 'https://raw.githubusercontent.com/QuentinABG/Win11-Baseline/main/Init-WindowsClient11.ps1'))) -NoGUI -Preset ANSSI-Eleve
 
 .NOTES
-    Version : 2.0.0
+    Version : 2.3.1
     Licence : MIT
     AVERTISSEMENT : sous-ensemble representatif de mesures inspirees de CIS et
     ANSSI BP-028. Ni exhaustif, ni une certification de conformite. Testez sur
@@ -73,7 +73,7 @@ param(
 # Sert a se relancer en administrateur quand on tourne "en memoire"
 # (irm | iex). SEULE ligne a adapter en cas de fork.
 $script:RawUrl  = 'https://raw.githubusercontent.com/QuentinABG/Win11-Baseline/main/Init-WindowsClient11.ps1'
-$script:Version = '2.0.0'
+$script:Version = '2.3.1'
 
 # --- TLS 1.2 explicite (PS 5.1 peut encore negocier TLS 1.0/1.1) ------
 try {
@@ -115,6 +115,7 @@ $sync.LogQueue      = [System.Collections.Concurrent.ConcurrentQueue[string]]::n
 $sync.FormData      = @{}
 $sync.Checkboxes    = @{}
 $sync.ADShares      = [System.Collections.Generic.List[PSObject]]::new()
+$sync.ShareRows     = [System.Collections.Generic.List[PSObject]]::new()
 
 # --- Journalisation ---------------------------------------------------
 $sync.LogDir  = Join-Path $env:LOCALAPPDATA 'Win11-Baseline\logs'
@@ -666,6 +667,41 @@ function Join-W11BDomain {
     return "$msg (redemarrage requis)"
 }
 
+function Test-W11BTcpPort {
+    <# .SYNOPSIS Test de connexion TCP borne dans le temps (evite d'attendre le delai TCP par defaut). #>
+    param(
+        [Parameter(Mandatory)][string]$Computer,
+        [int]$Port = 445,
+        [int]$TimeoutMs = 1500
+    )
+    $client = New-Object System.Net.Sockets.TcpClient
+    try {
+        $iar = $client.BeginConnect($Computer, $Port, $null, $null)
+        if (-not $iar.AsyncWaitHandle.WaitOne($TimeoutMs, $false)) { return $false }
+        $client.EndConnect($iar)
+        return $true
+    } catch {
+        return $false
+    } finally {
+        try { $client.Close() } catch { }
+    }
+}
+
+function Get-W11BNetErrorText {
+    <# .SYNOPSIS Libelle des codes d'erreur renvoyes par NetShareEnum. #>
+    param([int]$Code)
+    switch ($Code) {
+        5    { "acc&#232;s refus&#233;" }
+        51   { "r&#233;seau injoignable" }
+        53   { "chemin r&#233;seau introuvable (nom non r&#233;solu ou SMB ferm&#233;)" }
+        67   { "nom r&#233;seau introuvable" }
+        123  { "nom de serveur invalide" }
+        1231 { "r&#233;seau inaccessible" }
+        2114 { "le service Serveur n'est pas d&#233;marr&#233; sur la cible" }
+        default { "code $Code" }
+    }
+}
+
 function Get-W11BServerShares {
     <#
     .SYNOPSIS
@@ -673,78 +709,133 @@ function Get-W11BServerShares {
     .DESCRIPTION
         On n'utilise PAS 'net view' : sa sortie est LOCALISEE et donc impossible
         a analyser de facon fiable. NetShareEnum (netapi32.dll, niveau 1) renvoie
-        des donnees structurees, fonctionne avec de simples droits utilisateur et
-        ne depend pas de la langue de Windows.
-        Un test TCP/445 court precede l'appel : sans lui, un serveur eteint
-        bloquerait la decouverte pendant tout le delai TCP par defaut.
+        des donnees structurees, ne demande aucune appartenance de groupe
+        particuliere au niveau 1, et ne depend pas de la langue de Windows.
+
+        TOUT le marshalling est fait en C#, pas en PowerShell : appele depuis
+        PowerShell 5.1, [Marshal]::SizeOf($type) resout vers la surcharge
+        SizeOf(Object) et essaie de marshaler l'objet RuntimeType lui-meme
+        ("Impossible de marshaler le type 'System.RuntimeType'"). Cote C#,
+        typeof() leve l'ambiguite une fois pour toutes.
+
+        Deux formes de nom sont tentees : le FQDN issu de l'annuaire puis le nom
+        court NetBIOS, car un suffixe DNS mal resolu suffit a faire echouer la
+        premiere alors que la seconde fonctionne.
     #>
     param(
         [Parameter(Mandatory)][string]$Server,
-        [int]$TimeoutMs = 700
+        [int]$TimeoutMs = 1500
     )
 
-    if (-not ('W11BNetApi' -as [type])) {
-        Add-Type -TypeDefinition @"
+    # Nom de type versionne : dans une meme console, plusieurs 'irm | iex'
+    # successifs partagent l'AppDomain. Un type deja charge par une version
+    # anterieure ne peut pas etre redefini, et le garde ci-dessous sauterait
+    # l'Add-Type en laissant l'ancienne definition en place.
+    if (-not ('W11BShareApi' -as [type])) {
+        try {
+            Add-Type -TypeDefinition @'
 using System;
+using System.Collections.Generic;
 using System.Runtime.InteropServices;
-public class W11BNetApi {
+
+public static class W11BShareApi {
+
     [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
-    public struct SHARE_INFO_1 {
+    private struct SHARE_INFO_1 {
         [MarshalAs(UnmanagedType.LPWStr)] public string netname;
         public uint type;
         [MarshalAs(UnmanagedType.LPWStr)] public string remark;
     }
+
     [DllImport("netapi32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
-    public static extern int NetShareEnum(string serverName, int level, ref IntPtr buffer,
+    private static extern int NetShareEnum(string serverName, int level, ref IntPtr buffer,
         uint prefMaxLen, ref int entriesRead, ref int totalEntries, ref int resumeHandle);
+
     [DllImport("netapi32.dll")]
-    public static extern int NetApiBufferFree(IntPtr buffer);
+    private static extern int NetApiBufferFree(IntPtr buffer);
+
+    // Code de retour du dernier appel (0 = OK, 234 = ERROR_MORE_DATA).
+    public static int LastError = 0;
+
+    // Renvoie une ligne "nom<TAB>type<TAB>commentaire" par partage.
+    public static string[] EnumShares(string server) {
+        LastError = 0;
+        IntPtr buffer = IntPtr.Zero;
+        int read = 0, total = 0, resume = 0;
+        List<string> list = new List<string>();
+        try {
+            LastError = NetShareEnum("\\\\" + server, 1, ref buffer, 0xFFFFFFFF,
+                                     ref read, ref total, ref resume);
+            if (LastError != 0 && LastError != 234) { return new string[0]; }
+
+            int size = Marshal.SizeOf(typeof(SHARE_INFO_1));
+            for (int i = 0; i < read; i++) {
+                IntPtr p = new IntPtr(buffer.ToInt64() + (i * size));
+                SHARE_INFO_1 s = (SHARE_INFO_1)Marshal.PtrToStructure(p, typeof(SHARE_INFO_1));
+                list.Add(s.netname + "\t" + s.type.ToString() + "\t" + (s.remark == null ? "" : s.remark));
+            }
+        } finally {
+            if (buffer != IntPtr.Zero) { NetApiBufferFree(buffer); }
+        }
+        return list.ToArray();
+    }
 }
-"@ -ErrorAction Stop
+'@ -ErrorAction Stop
+        } catch {
+            Write-W11BLog -Level 'ERR' -Message "Chargement de l'API netapi32 impossible : $($_.Exception.Message)"
+            return @()
+        }
     }
 
-    # --- joignable sur SMB ? ---
-    $reachable = $false
-    $client = New-Object System.Net.Sockets.TcpClient
-    try {
-        $iar = $client.BeginConnect($Server, 445, $null, $null)
-        if ($iar.AsyncWaitHandle.WaitOne($TimeoutMs, $false)) {
-            $client.EndConnect($iar); $reachable = $true
-        }
-    } catch { } finally { try { $client.Close() } catch { } }
-    if (-not $reachable) { return @() }
+    $candidates = @($Server)
+    $short = ($Server -split '\.')[0]
+    if ($short -and $short -ne $Server) { $candidates += $short }
 
-    $out    = @()
-    $buffer = [IntPtr]::Zero
-    $read   = 0; $total = 0; $resume = 0
-    try {
-        $rc = [W11BNetApi]::NetShareEnum("\\$Server", 1, [ref]$buffer, [uint32]::MaxValue,
-                                         [ref]$read, [ref]$total, [ref]$resume)
-        # 0 = OK, 234 = ERROR_MORE_DATA (on exploite ce qui a ete renvoye)
-        if (($rc -eq 0 -or $rc -eq 234) -and $read -gt 0) {
-            $type = [type]'W11BNetApi+SHARE_INFO_1'
-            $size = [System.Runtime.InteropServices.Marshal]::SizeOf($type)
-            for ($i = 0; $i -lt $read; $i++) {
-                $ptr   = [IntPtr]($buffer.ToInt64() + ($i * $size))
-                $share = [System.Runtime.InteropServices.Marshal]::PtrToStructure($ptr, $type)
-                # STYPE_DISKTREE = 0 sur les 4 bits de poids faible ;
-                # STYPE_SPECIAL = 0x80000000 (ADMIN$, IPC$, C$...)
-                if (($share.type -band 0x0F) -ne 0)          { continue }
-                if (($share.type -band 0x80000000) -ne 0)    { continue }
-                if ($share.netname -like '*$')               { continue }
-                $out += [PSCustomObject]@{
-                    Name        = $share.netname
-                    UNC         = "\\$Server\$($share.netname)"
-                    Description = $share.remark
-                    Source      = 'Serveur'
-                }
+    foreach ($name in $candidates) {
+
+        if (-not (Test-W11BTcpPort -Computer $name -Port 445 -TimeoutMs $TimeoutMs)) {
+            Write-W11BLog -Level 'WARN' -Message "  $name : port 445 injoignable (DNS ou pare-feu)"
+            continue
+        }
+
+        try {
+            $rows = [W11BShareApi]::EnumShares($name)
+        } catch {
+            Write-W11BLog -Level 'WARN' -Message "  $name : erreur d'&#233;num&#233;ration - $($_.Exception.Message)"
+            continue
+        }
+
+        $rc = [W11BShareApi]::LastError
+        if ($rc -ne 0 -and $rc -ne 234) {
+            Write-W11BLog -Level 'WARN' -Message "  $name : NetShareEnum a &#233;chou&#233; ($(Get-W11BNetErrorText $rc))"
+            continue
+        }
+
+        $out = @(); $skipped = 0
+        foreach ($row in $rows) {
+            $f = $row -split "`t"
+            if ($f.Count -lt 2) { continue }
+            $shareName = $f[0]
+            $st        = [uint32]$f[1]
+            $remark    = if ($f.Count -ge 3) { $f[2] } else { '' }
+            # STYPE_DISKTREE = 0 sur les 4 bits de poids faible ;
+            # STYPE_SPECIAL  = 0x80000000 (ADMIN$, IPC$, C$...)
+            $isDisk    = (($st -band 0x0F) -eq 0)
+            $isSpecial = (($st -band 0x80000000) -ne 0) -or ($shareName -like '*$')
+            if (-not $isDisk -or $isSpecial) { $skipped++; continue }
+            $out += [PSCustomObject]@{
+                Name        = $shareName
+                UNC         = "\\$name\$shareName"
+                Description = $remark
+                Source      = 'Serveur'
             }
         }
-    } catch {
-    } finally {
-        if ($buffer -ne [IntPtr]::Zero) { [void][W11BNetApi]::NetApiBufferFree($buffer) }
+
+        Write-W11BLog -Level 'INFO' -Message "  $name : $($rows.Count) entr&#233;e(s) lue(s), $($out.Count) partage(s) retenu(s), $skipped ignor&#233;(s) (administratifs)"
+        if ($out.Count -gt 0) { return $out }
     }
-    return $out
+
+    return @()
 }
 
 function Get-W11BADPublishedShares {
@@ -835,6 +926,7 @@ function Get-W11BADPublishedShares {
     }
 
     $servers = @($servers | Sort-Object -Unique)
+    Write-W11BLog -Level 'INFO' -Message "$($servers.Count) serveur(s) Windows Server dans l'annuaire."
     if ($servers.Count -gt $MaxServers) {
         Write-W11BLog -Level 'WARN' -Message "$($servers.Count) serveurs trouv&#233;s : seuls les $MaxServers premiers sont interrog&#233;s."
         $servers = $servers[0..($MaxServers - 1)]
@@ -846,13 +938,43 @@ function Get-W11BADPublishedShares {
     foreach ($srv in $servers) {
         $shares = @(Get-W11BServerShares -Server $srv)
         if ($shares.Count -eq 0) { continue }
-        Write-W11BLog -Level 'INFO' -Message "  $srv : $($shares.Count) partage(s)"
         foreach ($s in $shares) {
             if ($seen.Add($s.UNC.TrimEnd('\'))) { $results.Add($s) }
         }
     }
 
-    return @($results | Sort-Object @{ Expression = 'Source'; Descending = $false }, 'UNC')
+    $all = @($results | Sort-Object @{ Expression = 'Source'; Descending = $false }, 'UNC')
+    if ($all.Count -eq 0) { return $all }
+
+    # Filtrage sur les droits REELS de l'utilisateur de la session, pas sur
+    # ceux du compte eleve qui execute ce script. Table vide = test non
+    # concluant : on n'affiche alors rien de moins, plutot que de masquer
+    # a tort des partages accessibles.
+    Write-W11BLog -Level 'INFO' -Message "V&#233;rification des droits d'acc&#232;s pour $(Get-W11BInteractiveUser)..."
+    $access = Test-W11BUserAccess -Paths @($all | ForEach-Object { $_.UNC })
+    if ($access.Count -eq 0) { return $all }
+
+    $kept   = @($all | Where-Object { $access[$_.UNC] -ne $false })
+    $hidden = $all.Count - $kept.Count
+    if ($hidden -gt 0) {
+        Write-W11BLog -Level 'INFO' -Message "$hidden partage(s) masqu&#233;(s) : acc&#232;s refus&#233; pour $(Get-W11BInteractiveUser)."
+    }
+    return $kept
+}
+
+function Get-W11BInteractiveUser {
+    <#
+    .SYNOPSIS
+        Compte reellement connecte a la session interactive.
+    .DESCRIPTION
+        En elevation "par-dessus l'epaule", $env:USERNAME est le compte
+        administrateur saisi dans l'invite UAC, pas l'utilisateur de la session :
+        c'est pourtant dans SA session que le lecteur doit apparaitre.
+    #>
+    $u = $null
+    try { $u = (Get-CimInstance -ClassName Win32_ComputerSystem -ErrorAction Stop).UserName } catch { }
+    if ([string]::IsNullOrWhiteSpace($u)) { $u = "$env:USERDOMAIN\$env:USERNAME" }
+    return $u
 }
 
 function Invoke-W11BAsInteractiveUser {
@@ -878,11 +1000,7 @@ function Invoke-W11BAsInteractiveUser {
         [int]$TimeoutSeconds = 90
     )
 
-    # Utilisateur reellement connecte a la console : en elevation "par-dessus
-    # l'epaule", $env:USERNAME est le compte admin, pas l'utilisateur de la session.
-    $target = $null
-    try { $target = (Get-CimInstance -ClassName Win32_ComputerSystem -ErrorAction Stop).UserName } catch { }
-    if ([string]::IsNullOrWhiteSpace($target)) { $target = "$env:USERDOMAIN\$env:USERNAME" }
+    $target = Get-W11BInteractiveUser
 
     $taskName = 'Win11-Baseline-' + [guid]::NewGuid().ToString('N').Substring(0, 12)
     try {
@@ -907,6 +1025,116 @@ function Invoke-W11BAsInteractiveUser {
     }
 }
 
+function New-W11BSharedTempFile {
+    <#
+    .SYNOPSIS
+        Fichier temporaire accessible A LA FOIS au processus eleve et a
+        l'utilisateur interactif.
+    .DESCRIPTION
+        C:\Windows\Temp accorde au groupe Utilisateurs le droit d'ecrire, mais
+        PAS de lire les fichiers crees par un autre compte : sans ACE explicite,
+        un processus lance sous le jeton limite echoue sur "Acces refuse".
+    #>
+    param(
+        [Parameter(Mandatory)][string]$Extension,
+        [string[]]$Content,
+        [ValidateSet('OEM','UTF8')][string]$Encoding = 'OEM'
+    )
+    $path = Join-Path $env:SystemRoot ('Temp\w11b-{0}{1}' -f [guid]::NewGuid().ToString('N').Substring(0, 12), $Extension)
+    if ($Content) { Set-Content -Path $path -Value $Content -Encoding $Encoding -Force -ErrorAction Stop }
+    else          { New-Item -Path $path -ItemType File -Force -ErrorAction Stop | Out-Null }
+    try {
+        $acl = Get-Acl -Path $path
+        $acl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule(
+            (Get-W11BInteractiveUser), 'Modify', 'Allow')))
+        Set-Acl -Path $path -AclObject $acl -ErrorAction Stop
+    } catch {
+        Write-W11BLog -Level 'WARN' -Message "Droits du fichier temporaire non ajust&#233;s : $($_.Exception.Message)"
+    }
+    return $path
+}
+
+function Test-W11BPathReadable {
+    <# .SYNOPSIS Le chemin est-il listable par le compte courant ? #>
+    param([Parameter(Mandatory)][string]$Path)
+    try {
+        $null = @(Get-ChildItem -LiteralPath $Path -Force -ErrorAction Stop | Select-Object -First 1)
+        return $true
+    } catch {
+        return $false
+    }
+}
+
+function Test-W11BUserAccess {
+    <#
+    .SYNOPSIS
+        Determine, DANS LA SESSION DE L'UTILISATEUR, quels chemins UNC sont
+        reellement accessibles.
+    .DESCRIPTION
+        Le script tourne eleve, souvent sous un compte administrateur different
+        de l'utilisateur connecte : tester l'acces ici repondrait pour le
+        MAUVAIS compte, et masquerait justement l'inverse de ce qu'il faut.
+        Le test est donc execute dans la session interactive, en UNE SEULE
+        tache planifiee pour l'ensemble des chemins (pas une par partage).
+        Retourne une table chemin -> $true/$false. Table VIDE si le test n'a
+        pas pu etre mene : l'appelant ne doit alors rien filtrer, plutot que de
+        masquer a tort des partages accessibles.
+    #>
+    param(
+        [Parameter(Mandatory)][string[]]$Paths,
+        [int]$TimeoutSeconds = 120
+    )
+
+    $result = @{}
+    if (-not $Paths -or $Paths.Count -eq 0) { return $result }
+
+    if (-not (Test-W11BAdmin)) {
+        foreach ($p in $Paths) { $result[$p] = (Test-W11BPathReadable -Path $p) }
+        return $result
+    }
+
+    $inFile = $null; $outFile = $null; $psFile = $null
+    try {
+        $inFile  = New-W11BSharedTempFile -Extension '.txt' -Content $Paths -Encoding UTF8
+        $outFile = New-W11BSharedTempFile -Extension '.out' -Encoding UTF8
+
+        $body = @'
+$ErrorActionPreference = 'SilentlyContinue'
+$res = foreach ($p in (Get-Content -LiteralPath '__IN__')) {
+    $p = $p.Trim()
+    if (-not $p) { continue }
+    try {
+        $null = @(Get-ChildItem -LiteralPath $p -Force -ErrorAction Stop | Select-Object -First 1)
+        "OK`t$p"
+    } catch {
+        "KO`t$p"
+    }
+}
+$res | Set-Content -LiteralPath '__OUT__' -Encoding UTF8
+'@
+        $body   = $body.Replace('__IN__', $inFile).Replace('__OUT__', $outFile)
+        $psFile = New-W11BSharedTempFile -Extension '.ps1' -Content ($body -split "`r?`n") -Encoding UTF8
+
+        $exe = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+        $null = Invoke-W11BAsInteractiveUser -FilePath $exe `
+                    -Arguments "-NoProfile -ExecutionPolicy Bypass -File `"$psFile`"" `
+                    -TimeoutSeconds $TimeoutSeconds
+
+        foreach ($line in @(Get-Content -LiteralPath $outFile -ErrorAction SilentlyContinue)) {
+            $f = $line -split "`t"
+            if ($f.Count -ge 2) { $result[$f[1]] = ($f[0] -eq 'OK') }
+        }
+    } catch {
+        Write-W11BLog -Level 'WARN' -Message "Test d'acc&#232;s dans la session utilisateur impossible : $($_.Exception.Message). Aucun partage ne sera masqu&#233;."
+        return @{}
+    } finally {
+        foreach ($f in @($inFile, $outFile, $psFile)) {
+            if ($f -and (Test-Path $f)) { Remove-Item -Path $f -Force -ErrorAction SilentlyContinue }
+        }
+    }
+    return $result
+}
+
 function New-W11BNetworkDrive {
     <#
     .SYNOPSIS
@@ -928,8 +1156,7 @@ function New-W11BNetworkDrive {
     param(
         [Parameter(Mandatory)][ValidatePattern('^[A-Za-z]$')][string]$Letter,
         [Parameter(Mandatory)][string]$UncPath,
-        [System.Management.Automation.PSCredential]$Credential,
-        [switch]$Replace
+        [System.Management.Automation.PSCredential]$Credential
     )
 
     if ($UncPath -notmatch '^\\\\[^\\]+\\.+') { throw "Chemin UNC invalide (format attendu : \\serveur\partage)" }
@@ -948,16 +1175,32 @@ function New-W11BNetworkDrive {
 
     # C:\Windows\Temp : accessible aux deux contextes, contrairement au %TEMP%
     # du profil administrateur en elevation par-dessus l'epaule.
-    $stamp   = [guid]::NewGuid().ToString('N').Substring(0, 12)
-    $cmdFile = Join-Path $env:SystemRoot "Temp\w11b-$stamp.cmd"
-    $outFile = Join-Path $env:SystemRoot "Temp\w11b-$stamp.out"
+    $masked = if ($Credential) { "net use ${Letter}: `"$UncPath`" *** /user:`"$($Credential.UserName)`" /persistent:yes" } else { $netUse }
+    Write-W11BLog -Level 'INFO' -Message "Commande : $masked"
+    Write-W11BLog -Level 'INFO' -Message "Session cible : $(Get-W11BInteractiveUser)"
+
+    $cmdFile = $null
+    $outFile = $null
 
     try {
+        $outFile = New-W11BSharedTempFile -Extension '.out'
         $lines = @('@echo off')
-        if ($Replace) { $lines += "net use ${Letter}: /delete /y >`"$outFile`" 2>&1" }
+        # La lettre est toujours liberee d'abord : un mappage residuel (meme
+        # deconnecte) fait echouer net use avec ERROR_ALREADY_ASSIGNED.
+        $lines += "net use ${Letter}: /delete /y >`"$outFile`" 2>&1"
         $lines += "$netUse >>`"$outFile`" 2>&1"
-        $lines += 'exit /b %errorlevel%'
-        Set-Content -Path $cmdFile -Value $lines -Encoding OEM -Force -ErrorAction Stop
+        $lines += 'if errorlevel 1 exit /b %errorlevel%'
+        # Le mappage peut reussir alors que l'utilisateur ne peut RIEN lire :
+        # les droits de PARTAGE autorisent souvent tout le monde, et c'est
+        # l'ACL NTFS qui refuse. On liste donc le lecteur pour de vrai, et on
+        # retire le mappage plutot que de laisser un lecteur inutilisable.
+        $lines += "dir ${Letter}:\ >>`"$outFile`" 2>&1"
+        $lines += 'if errorlevel 1 ('
+        $lines += "  net use ${Letter}: /delete /y >>`"$outFile`" 2>&1"
+        $lines += '  exit /b 65'
+        $lines += ')'
+        $lines += 'exit /b 0'
+        $cmdFile = New-W11BSharedTempFile -Extension '.cmd' -Content $lines
 
         $code = $null
         if (-not (Test-W11BAdmin)) {
@@ -972,7 +1215,7 @@ function New-W11BNetworkDrive {
                 # Planificateur absent, service arrete, strategie qui bloque la
                 # creation de taches... : on mappe dans le contexte eleve, en le disant.
                 Write-W11BLog -Level 'WARN' -Message "Ex&#233;cution en session utilisateur impossible ($($_.Exception.Message)). Repli sur le contexte &#233;lev&#233; : le lecteur n'appara&#238;tra dans l'Explorateur qu'apr&#232;s r&#233;ouverture de session, ou avec EnableLinkedConnections."
-                return (New-W11BNetworkDriveElevated -Letter $Letter -UncPath $UncPath -Credential $Credential -Replace:$Replace)
+                return (New-W11BNetworkDriveElevated -Letter $Letter -UncPath $UncPath -Credential $Credential)
             }
         }
 
@@ -983,6 +1226,7 @@ function New-W11BNetworkDrive {
         }
 
         if ($code -ne 0) {
+            if ($code -eq 65) { throw "l'utilisateur $(Get-W11BInteractiveUser) n'a pas les droits d'acc&#232;s &#224; $UncPath (le mappage a &#233;t&#233; retir&#233;)." }
             $hint = switch ($code) {
                 2  { "acc&#232;s refus&#233; ou partage introuvable" }
                 85 { "la lettre ${Letter}: est d&#233;j&#224; utilis&#233;e dans la session de l'utilisateur" }
@@ -991,7 +1235,7 @@ function New-W11BNetworkDrive {
             throw "net use a &#233;chou&#233; ($hint). $detail".Trim()
         }
 
-        Write-W11BLog -Level 'INFO' -Message "Mappage ex&#233;cut&#233; dans la session de $env:USERNAME (int&#233;grit&#233; moyenne) : visible imm&#233;diatement dans l'Explorateur."
+        Write-W11BLog -Level 'INFO' -Message "Mappage ex&#233;cut&#233; dans la session de $(Get-W11BInteractiveUser) (int&#233;grit&#233; moyenne) : visible imm&#233;diatement dans l'Explorateur."
         return "Lecteur ${Letter}: -> $UncPath (persistant, session utilisateur)"
 
     } finally {
@@ -1002,17 +1246,51 @@ function New-W11BNetworkDrive {
     }
 }
 
+function New-W11BNetworkDrives {
+    <#
+    .SYNOPSIS
+        Mappe PLUSIEURS lecteurs reseau en une seule action.
+    .DESCRIPTION
+        Chaque lecteur est traite independamment : un partage en echec
+        n'empeche pas les suivants d'etre montes. L'action n'est declaree en
+        echec que s'il reste au moins une erreur a la fin, avec le detail dans
+        le journal.
+    .PARAMETER Drives
+        Tableau de tables @{ Letter = 'Z'; UncPath = '\\serveur\partage' }.
+    #>
+    param(
+        [Parameter(Mandatory)][hashtable[]]$Drives,
+        [System.Management.Automation.PSCredential]$Credential
+    )
+
+    $ok = 0
+    $failed = @()
+    foreach ($d in $Drives) {
+        try {
+            $msg = New-W11BNetworkDrive -Letter $d.Letter -UncPath $d.UncPath -Credential $Credential
+            Write-W11BLog -Level 'OK' -Message $msg
+            $ok++
+        } catch {
+            Write-W11BLog -Level 'ERR' -Message "$($d.Letter): -> $($d.UncPath) : $($_.Exception.Message)"
+            $failed += "$($d.Letter): $($d.UncPath)"
+        }
+    }
+
+    if ($failed.Count -gt 0) {
+        throw "$ok lecteur(s) mapp&#233;(s), $($failed.Count) en &#233;chec : $($failed -join ' ; ')"
+    }
+    return "$ok lecteur(s) mapp&#233;(s)"
+}
+
 function New-W11BNetworkDriveElevated {
     <# .SYNOPSIS Repli : mappage dans le contexte eleve (visibilite differee). #>
     param(
         [Parameter(Mandatory)][string]$Letter,
         [Parameter(Mandatory)][string]$UncPath,
-        [System.Management.Automation.PSCredential]$Credential,
-        [switch]$Replace
+        [System.Management.Automation.PSCredential]$Credential
     )
     $used = @(Get-PSDrive -PSProvider FileSystem -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Name)
     if ($used -contains $Letter) {
-        if (-not $Replace) { throw "La lettre $Letter est d&#233;j&#224; utilis&#233;e (cochez 'remplacer' pour l'&#233;craser)." }
         Remove-PSDrive -Name $Letter -Force -ErrorAction SilentlyContinue
         & cmd.exe /c "net use ${Letter}: /delete /y" 2>&1 | Out-Null
     }
@@ -1025,8 +1303,13 @@ function New-W11BNetworkDriveElevated {
 function Invoke-W11BLinkedConnections {
     <#
     .SYNOPSIS
-        EnableLinkedConnections : rend les lecteurs mappes visibles entre le
-        jeton standard et le jeton eleve (UAC). Redemarrage requis.
+        EnableLinkedConnections : relie les mappages du jeton standard et du
+        jeton eleve (UAC). Redemarrage requis.
+    .DESCRIPTION
+        Utile pour les applications lancees en tant qu'administrateur, qui
+        sinon ne voient pas les lecteurs reseau de l'utilisateur. N'est PAS
+        necessaire aux mappages crees par cet outil : New-W11BNetworkDrive
+        les monte directement dans la session de l'utilisateur.
     #>
     Set-W11BRegistry -Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System' `
                      -Name 'EnableLinkedConnections' -Value 1
@@ -1330,13 +1613,13 @@ $sync.Catalog = @(
        Apply='Join-W11BDomain'; Undo=$null }
 
     @{ Id='NET-MapDrive';        Category='Systeme'; Kind='Form';   Risk='Faible';   Reboot=$false
-       Name='Mapper un lecteur r&#233;seau (persistant)'
-       Tip='D&#233;couverte des partages publi&#233;s dans l''AD (sans RSAT) ou saisie manuelle d''un chemin UNC.'
-       Apply='New-W11BNetworkDrive'; Undo=$null }
+       Name='Mapper des lecteurs r&#233;seau (persistants)'
+       Tip='Coche les partages &#224; monter et choisis une lettre pour chacun : ils sont mapp&#233;s en une seule application. Seuls les partages r&#233;ellement accessibles &#224; l''utilisateur de la session sont list&#233;s.'
+       Apply='New-W11BNetworkDrives'; Undo=$null }
 
     @{ Id='NET-LinkedConn';      Category='Systeme'; Kind='Toggle'; Risk='Sensible'; Reboot=$true
-       Name='EnableLinkedConnections (lecteurs visibles en session standard)'
-       Tip='Rend les lecteurs mapp&#233;s visibles entre le jeton standard et le jeton &#233;lev&#233; (UAC). L&#233;g&#232;rement permissif du point de vue s&#233;curit&#233;. Red&#233;marrage requis.'
+       Name='EnableLinkedConnections (lecteurs r&#233;seau visibles des applications &#233;lev&#233;es)'
+       Tip='Sans ce r&#233;glage, une application lanc&#233;e en tant qu''administrateur (script de sauvegarde, installeur, logiciel m&#233;tier) ne voit pas les lecteurs r&#233;seau de l''utilisateur. Sans rapport avec le mappage de cet outil, qui est visible imm&#233;diatement. Contournement d''interop&#233;rabilit&#233; document&#233; par Microsoft, l&#233;g&#232;rement permissif : ni CIS ni l''ANSSI ne le demandent. Red&#233;marrage requis.'
        Apply='Invoke-W11BLinkedConnections'; Undo='Undo-W11BLinkedConnections' }
 )
 
@@ -2043,40 +2326,42 @@ $inputXAML = @'
 
             <Border Style="{StaticResource Card}">
               <StackPanel>
-                <TextBlock Text="Lecteur r&#233;seau" Style="{StaticResource H2}"/>
+                <TextBlock Text="Lecteurs r&#233;seau" Style="{StaticResource H2}"/>
                 <CheckBox x:Name="ChkDrive" Style="{StaticResource ToggleSwitch}" Margin="0,8,0,12"
-                          Content="Mapper un lecteur r&#233;seau (persistant)"/>
-                <Grid x:Name="GrpDrive" IsEnabled="False" Margin="54,0,0,0">
-                  <Grid.ColumnDefinitions>
-                    <ColumnDefinition Width="150"/><ColumnDefinition Width="*"/>
-                  </Grid.ColumnDefinitions>
-                  <Grid.RowDefinitions>
-                    <RowDefinition Height="Auto"/><RowDefinition Height="Auto"/>
-                    <RowDefinition Height="Auto"/><RowDefinition Height="Auto"/>
-                    <RowDefinition Height="Auto"/>
-                  </Grid.RowDefinitions>
-                  <TextBlock Grid.Row="0" Text="Partages publi&#233;s" VerticalAlignment="Center" Margin="0,0,0,8"/>
-                  <Grid Grid.Row="0" Grid.Column="1" Margin="0,0,0,8">
+                          Content="Mapper des lecteurs r&#233;seau (persistants)"/>
+                <StackPanel x:Name="GrpDrive" IsEnabled="False" Margin="54,0,0,0">
+
+                  <Grid Margin="0,0,0,10">
+                    <Grid.ColumnDefinitions>
+                      <ColumnDefinition Width="Auto"/><ColumnDefinition Width="*"/>
+                    </Grid.ColumnDefinitions>
+                    <Button x:Name="BtnDiscoverAD" Style="{StaticResource BtnSmall}"
+                            Content="Rechercher les partages"
+                            ToolTip="Liste les partages publi&#233;s dans l'annuaire ET les partages des serveurs du domaine (sans RSAT), en ne gardant que ceux auxquels l'utilisateur de la session a r&#233;ellement acc&#232;s."/>
+                    <TextBlock Grid.Column="1" x:Name="LblShares" Style="{StaticResource Muted}"
+                               VerticalAlignment="Center" Margin="12,0,0,0"
+                               Text="Aucune recherche effectu&#233;e."/>
+                  </Grid>
+
+                  <Border BorderBrush="{StaticResource BorderCol}" BorderThickness="1" CornerRadius="6"
+                          Background="#1A1C20" Padding="4" Margin="0,0,0,14">
+                    <ScrollViewer MaxHeight="230" VerticalScrollBarVisibility="Auto">
+                      <StackPanel x:Name="PanelShares"/>
+                    </ScrollViewer>
+                  </Border>
+
+                  <TextBlock Text="Ou un chemin UNC non list&#233;" Style="{StaticResource Muted}" Margin="0,0,0,6"/>
+                  <Grid Margin="0,0,0,14">
                     <Grid.ColumnDefinitions>
                       <ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/>
                     </Grid.ColumnDefinitions>
-                    <ComboBox x:Name="CmbShares" Style="{StaticResource Cmb}"/>
-                    <Button Grid.Column="1" x:Name="BtnDiscoverAD" Style="{StaticResource BtnSmall}" Margin="8,0,0,0"
-                            Content="Rechercher dans l'AD"
-                            ToolTip="Liste les partages publi&#233;s dans l'annuaire ET les partages des serveurs du domaine (sans RSAT). N&#233;cessite que le poste soit d&#233;j&#224; membre du domaine."/>
+                    <TextBox x:Name="TxtUnc" Style="{StaticResource Field}" ToolTip="\\serveur\partage"/>
+                    <ComboBox Grid.Column="1" x:Name="CmbLetter" Style="{StaticResource Cmb}" Width="80" Margin="8,0,0,0"/>
                   </Grid>
-                  <TextBlock Grid.Row="1" Text="Chemin UNC" VerticalAlignment="Center" Margin="0,0,0,8"/>
-                  <TextBox   Grid.Row="1" Grid.Column="1" x:Name="TxtUnc" Style="{StaticResource Field}" Margin="0,0,0,8"
-                             ToolTip="\\serveur\partage"/>
-                  <TextBlock Grid.Row="2" Text="Lettre" VerticalAlignment="Center" Margin="0,0,0,8"/>
-                  <StackPanel Grid.Row="2" Grid.Column="1" Orientation="Horizontal" Margin="0,0,0,8">
-                    <ComboBox x:Name="CmbLetter" Style="{StaticResource Cmb}" Width="80"/>
-                    <CheckBox x:Name="ChkReplace" Style="{StaticResource ToggleSwitch}" Margin="20,0,0,0"
-                              Content="Remplacer si d&#233;j&#224; utilis&#233;e"/>
-                  </StackPanel>
-                  <CheckBox Grid.Row="3" Grid.ColumnSpan="2" x:Name="ChkDriveCred" Style="{StaticResource ToggleSwitch}"
-                            Margin="0,0,0,10" Content="Utiliser des identifiants sp&#233;cifiques"/>
-                  <Grid Grid.Row="4" Grid.ColumnSpan="2" x:Name="GrpDriveCred" IsEnabled="False">
+
+                  <CheckBox x:Name="ChkDriveCred" Style="{StaticResource ToggleSwitch}" Margin="0,0,0,10"
+                            Content="Utiliser des identifiants sp&#233;cifiques (pour tous les partages)"/>
+                  <Grid x:Name="GrpDriveCred" IsEnabled="False">
                     <Grid.ColumnDefinitions>
                       <ColumnDefinition Width="150"/><ColumnDefinition Width="*"/>
                     </Grid.ColumnDefinitions>
@@ -2088,10 +2373,11 @@ $inputXAML = @'
                     <TextBlock Grid.Row="1" Text="Mot de passe" VerticalAlignment="Center"/>
                     <PasswordBox Grid.Row="1" Grid.Column="1" x:Name="PwdDrive" Style="{StaticResource FieldPwd}"/>
                   </Grid>
-                </Grid>
+                </StackPanel>
 
                 <CheckBox x:Name="ChkLinked" Style="{StaticResource ToggleSwitch}" Margin="0,16,0,0"
-                          Content="EnableLinkedConnections (lecteurs visibles en session standard)"/>
+                          Content="EnableLinkedConnections (lecteurs r&#233;seau visibles des applications &#233;lev&#233;es)"
+                          ToolTip="Concerne les applications lanc&#233;es en tant qu'administrateur, qui ne voient pas les lecteurs de l'utilisateur. Les lecteurs mont&#233;s par cet outil, eux, sont d&#233;j&#224; visibles imm&#233;diatement. Red&#233;marrage requis."/>
               </StackPanel>
             </Border>
 
@@ -2370,6 +2656,61 @@ function Register-W11BUIToggle {
     $CheckBox.Add_Unchecked({ Update-W11BUISelectionCount })
 }
 
+function Get-W11BFreeLetters {
+    <# .SYNOPSIS Lettres de lecteur : toutes (Z..E) et celles encore libres. #>
+    $used = @(Get-PSDrive -PSProvider FileSystem -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Name)
+    $all  = @(90..69 | ForEach-Object { [string][char]$_ })
+    return [PSCustomObject]@{ All = $all; Free = @($all | Where-Object { $used -notcontains $_ }) }
+}
+
+function Add-W11BUIShareRow {
+    <#
+    .SYNOPSIS
+        Ajoute une ligne "partage + lettre" dans la liste de mappage.
+    .DESCRIPTION
+        Une case a cocher par partage et sa propre liste de lettres : cocher
+        plusieurs lignes monte plusieurs lecteurs en une seule application.
+        Chaque ligne recoit d office une lettre libre distincte, modifiable.
+    #>
+    param(
+        [Parameter(Mandatory)]$Share,
+        [Parameter(Mandatory)][string[]]$Letters,
+        [string]$DefaultLetter
+    )
+
+    $grid = New-Object System.Windows.Controls.Grid
+    $grid.Margin = New-Object System.Windows.Thickness(6, 3, 6, 3)
+    $c1 = New-Object System.Windows.Controls.ColumnDefinition
+    $c1.Width = New-Object System.Windows.GridLength(1, 'Star')
+    $c2 = New-Object System.Windows.Controls.ColumnDefinition
+    $c2.Width = [System.Windows.GridLength]::Auto
+    $grid.ColumnDefinitions.Add($c1)
+    $grid.ColumnDefinitions.Add($c2)
+
+    $cb = New-Object System.Windows.Controls.CheckBox
+    $cb.Style   = $sync.Form.FindResource('ToggleSwitch')
+    $cb.Content = "$($Share.Name)   ->   $($Share.UNC)"
+    $cb.VerticalAlignment = 'Center'
+    $tip = $Share.UNC
+    if ($Share.Description) { $tip += "`n$($Share.Description)" }
+    $tip += "`nSource : $($Share.Source)"
+    $cb.ToolTip = $tip
+    [System.Windows.Controls.Grid]::SetColumn($cb, 0)
+    $grid.Children.Add($cb) | Out-Null
+
+    $cmb = New-Object System.Windows.Controls.ComboBox
+    $cmb.Style  = $sync.Form.FindResource('Cmb')
+    $cmb.Width  = 76
+    $cmb.Margin = New-Object System.Windows.Thickness(10, 0, 0, 0)
+    foreach ($l in $Letters) { $cmb.Items.Add($l) | Out-Null }
+    if ($DefaultLetter) { $cmb.SelectedItem = $DefaultLetter }
+    [System.Windows.Controls.Grid]::SetColumn($cmb, 1)
+    $grid.Children.Add($cmb) | Out-Null
+
+    $sync.PanelShares.Children.Add($grid) | Out-Null
+    $sync.ShareRows.Add([PSCustomObject]@{ Check = $cb; Letter = $cmb; Unc = $Share.UNC; Name = $Share.Name })
+}
+
 function Add-W11BUIActionRow {
     <#
     .SYNOPSIS
@@ -2530,16 +2871,38 @@ function Get-W11BUIFormData {
         $data['SYS-DomainJoin'] = $entry
     }
 
-    # --- Lecteur reseau -----------------------------------------------
+    # --- Lecteurs reseau (selection multiple) --------------------------
     if ($sync.Checkboxes['NET-MapDrive'].IsChecked) {
-        $unc = $sync.TxtUnc.Text.Trim()
-        if (-not $unc) { return @{ Error = "Chemin UNC du partage manquant." } }
-        if (-not $sync.CmbLetter.SelectedItem) { return @{ Error = "Lettre de lecteur manquante." } }
-        $entry = @{
-            Letter  = [string]$sync.CmbLetter.SelectedItem
-            UncPath = $unc
-            Replace = [bool]$sync.ChkReplace.IsChecked
+        $drives = @()
+
+        foreach ($row in $sync.ShareRows) {
+            if (-not $row.Check.IsChecked) { continue }
+            if (-not $row.Letter.SelectedItem) {
+                return @{ Error = "Aucune lettre choisie pour $($row.Unc)." }
+            }
+            $drives += @{ Letter = [string]$row.Letter.SelectedItem; UncPath = $row.Unc }
         }
+
+        # Chemin saisi a la main : traite comme un partage de plus.
+        $unc = $sync.TxtUnc.Text.Trim()
+        if ($unc) {
+            if (-not $sync.CmbLetter.SelectedItem) {
+                return @{ Error = "Aucune lettre choisie pour le chemin UNC saisi." }
+            }
+            $drives += @{ Letter = [string]$sync.CmbLetter.SelectedItem; UncPath = $unc }
+        }
+
+        if ($drives.Count -eq 0) {
+            return @{ Error = "Aucun partage s&#233;lectionn&#233;. Cochez au moins un partage dans la liste, ou saisissez un chemin UNC." }
+        }
+
+        # Deux partages sur la meme lettre : le second ecraserait le premier.
+        $dup = @($drives | Group-Object { $_.Letter } | Where-Object { $_.Count -gt 1 })
+        if ($dup.Count -gt 0) {
+            return @{ Error = "La lettre $($dup[0].Name): est utilis&#233;e pour $($dup[0].Count) partages. Choisissez une lettre distincte pour chacun." }
+        }
+
+        $entry = @{ Drives = $drives }
         if ($sync.ChkDriveCred.IsChecked) {
             $du = $sync.TxtDriveUser.Text.Trim()
             if (-not $du) { return @{ Error = "Utilisateur du partage manquant." } }
@@ -2823,6 +3186,9 @@ function Start-W11BGui {
         if ($sync.Running) { return }
         $sync.BtnDiscoverAD.IsEnabled = $false
         $sync.ADShares.Clear()
+        $sync.ShareRows.Clear()
+        $sync.PanelShares.Children.Clear()
+        $sync.LblShares.Text = Get-W11BText "Recherche en cours..."
         $sync.ADSharesReady = $false
         Write-W11BLog -Level 'INFO' -Message 'Recherche des partages du domaine (annuaire + serveurs)...'
         Start-W11BRunspace -ScriptBlock {
@@ -2830,10 +3196,6 @@ function Start-W11BGui {
             Write-W11BLog -Level 'INFO' -Message "$($sync.ADShares.Count) partage(s) trouv&#233;(s)."
             $sync.ADSharesReady = $true
         } | Out-Null
-    })
-    $sync.CmbShares.Add_SelectionChanged({
-        $sel = $sync.CmbShares.SelectedItem
-        if ($sel) { $sync.TxtUnc.Text = ([string]$sel -split '  ->  ')[-1] }
     })
 
     # --- Boutons : appliquer / annuler -------------------------------------
@@ -2864,9 +3226,24 @@ function Start-W11BGui {
 
         if ($sync.ADSharesReady) {
             $sync.ADSharesReady = $false
-            $sync.CmbShares.Items.Clear()
-            foreach ($s in $sync.ADShares) { $sync.CmbShares.Items.Add("$($s.Name)  ->  $($s.UNC)") | Out-Null }
-            if ($sync.CmbShares.Items.Count -gt 0) { $sync.CmbShares.SelectedIndex = 0 }
+            $sync.PanelShares.Children.Clear()
+            $sync.ShareRows.Clear()
+
+            # Une lettre libre distincte par ligne, dans l ordre Z, Y, X...
+            $lt   = Get-W11BFreeLetters
+            $free = @($lt.Free)
+            $k    = 0
+            foreach ($s in $sync.ADShares) {
+                $def = if ($k -lt $free.Count) { $free[$k] } else { $null }
+                Add-W11BUIShareRow -Share $s -Letters $lt.All -DefaultLetter $def
+                $k++
+            }
+
+            $sync.LblShares.Text = if ($sync.ADShares.Count -gt 0) {
+                Get-W11BText "$($sync.ADShares.Count) partage(s) accessible(s). Cochez ceux &#224; monter."
+            } else {
+                Get-W11BText "Aucun partage accessible trouv&#233; (d&#233;tail dans le journal)."
+            }
             $sync.BtnDiscoverAD.IsEnabled = $true
         }
 
