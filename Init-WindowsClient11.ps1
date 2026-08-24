@@ -666,68 +666,360 @@ function Join-W11BDomain {
     return "$msg (redemarrage requis)"
 }
 
+function Get-W11BServerShares {
+    <#
+    .SYNOPSIS
+        Enumere les partages d'un serveur via l'API Windows NetShareEnum.
+    .DESCRIPTION
+        On n'utilise PAS 'net view' : sa sortie est LOCALISEE et donc impossible
+        a analyser de facon fiable. NetShareEnum (netapi32.dll, niveau 1) renvoie
+        des donnees structurees, fonctionne avec de simples droits utilisateur et
+        ne depend pas de la langue de Windows.
+        Un test TCP/445 court precede l'appel : sans lui, un serveur eteint
+        bloquerait la decouverte pendant tout le delai TCP par defaut.
+    #>
+    param(
+        [Parameter(Mandatory)][string]$Server,
+        [int]$TimeoutMs = 700
+    )
+
+    if (-not ('W11BNetApi' -as [type])) {
+        Add-Type -TypeDefinition @"
+using System;
+using System.Runtime.InteropServices;
+public class W11BNetApi {
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+    public struct SHARE_INFO_1 {
+        [MarshalAs(UnmanagedType.LPWStr)] public string netname;
+        public uint type;
+        [MarshalAs(UnmanagedType.LPWStr)] public string remark;
+    }
+    [DllImport("netapi32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    public static extern int NetShareEnum(string serverName, int level, ref IntPtr buffer,
+        uint prefMaxLen, ref int entriesRead, ref int totalEntries, ref int resumeHandle);
+    [DllImport("netapi32.dll")]
+    public static extern int NetApiBufferFree(IntPtr buffer);
+}
+"@ -ErrorAction Stop
+    }
+
+    # --- joignable sur SMB ? ---
+    $reachable = $false
+    $client = New-Object System.Net.Sockets.TcpClient
+    try {
+        $iar = $client.BeginConnect($Server, 445, $null, $null)
+        if ($iar.AsyncWaitHandle.WaitOne($TimeoutMs, $false)) {
+            $client.EndConnect($iar); $reachable = $true
+        }
+    } catch { } finally { try { $client.Close() } catch { } }
+    if (-not $reachable) { return @() }
+
+    $out    = @()
+    $buffer = [IntPtr]::Zero
+    $read   = 0; $total = 0; $resume = 0
+    try {
+        $rc = [W11BNetApi]::NetShareEnum("\\$Server", 1, [ref]$buffer, [uint32]::MaxValue,
+                                         [ref]$read, [ref]$total, [ref]$resume)
+        # 0 = OK, 234 = ERROR_MORE_DATA (on exploite ce qui a ete renvoye)
+        if (($rc -eq 0 -or $rc -eq 234) -and $read -gt 0) {
+            $type = [type]'W11BNetApi+SHARE_INFO_1'
+            $size = [System.Runtime.InteropServices.Marshal]::SizeOf($type)
+            for ($i = 0; $i -lt $read; $i++) {
+                $ptr   = [IntPtr]($buffer.ToInt64() + ($i * $size))
+                $share = [System.Runtime.InteropServices.Marshal]::PtrToStructure($ptr, $type)
+                # STYPE_DISKTREE = 0 sur les 4 bits de poids faible ;
+                # STYPE_SPECIAL = 0x80000000 (ADMIN$, IPC$, C$...)
+                if (($share.type -band 0x0F) -ne 0)          { continue }
+                if (($share.type -band 0x80000000) -ne 0)    { continue }
+                if ($share.netname -like '*$')               { continue }
+                $out += [PSCustomObject]@{
+                    Name        = $share.netname
+                    UNC         = "\\$Server\$($share.netname)"
+                    Description = $share.remark
+                    Source      = 'Serveur'
+                }
+            }
+        }
+    } catch {
+    } finally {
+        if ($buffer -ne [IntPtr]::Zero) { [void][W11BNetApi]::NetApiBufferFree($buffer) }
+    }
+    return $out
+}
+
 function Get-W11BADPublishedShares {
     <#
     .SYNOPSIS
-        Decouvre les partages PUBLIES dans l'Active Directory (objets 'volume').
+        Decouvre les partages reseau disponibles dans le domaine.
     .DESCRIPTION
+        Deux sources complementaires, car un partage n'apparait dans l'annuaire
+        que s'il y a ete PUBLIE explicitement (objet 'volume') - ce qui n'est
+        presque jamais fait en pratique. C'etait la cause du "aucun resultat"
+        alors que les partages existaient bien :
+          A. objets 'volume' publies dans l'AD (uNCName) ;
+          B. enumeration directe des partages de chaque serveur du domaine,
+             via NetShareEnum (voir Get-W11BServerShares).
         Utilise System.DirectoryServices (natif .NET) : RSAT n'est pas requis.
-        Renvoie un tableau { Name ; UNC ; Description }, vide si echec.
-        ATTENTION : appel LDAP potentiellement lent -> a executer en runspace.
+        Renvoie { Name ; UNC ; Description ; Source }. Appels reseau lents :
+        a executer en runspace, jamais sur le thread UI.
     #>
-    $results = @()
-    try {
-        $rootDSE   = New-Object System.DirectoryServices.DirectoryEntry("LDAP://RootDSE")
-        $defaultNC = $rootDSE.Properties["defaultNamingContext"].Value
-        if ([string]::IsNullOrWhiteSpace($defaultNC)) { return @() }
+    param([int]$MaxServers = 60)
 
-        $searchRoot = New-Object System.DirectoryServices.DirectoryEntry("LDAP://$defaultNC")
-        $searcher   = New-Object System.DirectoryServices.DirectorySearcher($searchRoot)
-        $searcher.Filter   = "(objectClass=volume)"
-        $searcher.PageSize = 200
-        [void]$searcher.PropertiesToLoad.Add("uNCName")
-        [void]$searcher.PropertiesToLoad.Add("name")
-        [void]$searcher.PropertiesToLoad.Add("description")
+    $results = New-Object System.Collections.Generic.List[PSObject]
+    $seen    = New-Object System.Collections.Generic.HashSet[string] ([StringComparer]::OrdinalIgnoreCase)
+
+    # --- Contexte de nommage du domaine ---
+    $defaultNC = $null
+    try {
+        $rootDSE   = New-Object System.DirectoryServices.DirectoryEntry('LDAP://RootDSE')
+        $defaultNC = [string]$rootDSE.Properties['defaultNamingContext'].Value
+    } catch {
+        Write-W11BLog -Level 'WARN' -Message "Annuaire injoignable : $($_.Exception.Message)"
+    }
+    if ([string]::IsNullOrWhiteSpace($defaultNC)) {
+        Write-W11BLog -Level 'WARN' -Message 'Aucun domaine joignable. Poste hors domaine, ou jonction pas encore effective (un red&#233;marrage est n&#233;cessaire). Saisissez le chemin UNC manuellement.'
+        return @()
+    }
+    Write-W11BLog -Level 'INFO' -Message "Annuaire interrog&#233; : $defaultNC"
+
+    # --- A. Partages PUBLIES dans l'annuaire (objets volume) ---
+    try {
+        $searcher = New-Object System.DirectoryServices.DirectorySearcher(
+                        (New-Object System.DirectoryServices.DirectoryEntry("LDAP://$defaultNC")))
+        $searcher.Filter     = '(objectClass=volume)'
+        $searcher.PageSize   = 200
+        $searcher.ClientTimeout = [TimeSpan]::FromSeconds(20)
+        [void]$searcher.PropertiesToLoad.Add('uNCName')
+        [void]$searcher.PropertiesToLoad.Add('name')
+        [void]$searcher.PropertiesToLoad.Add('description')
 
         $found = $searcher.FindAll()
         foreach ($f in $found) {
-            $unc = $null; $nm = $null; $desc = $null
-            if ($f.Properties["uncname"].Count     -gt 0) { $unc  = [string]$f.Properties["uncname"][0] }
-            if ($f.Properties["name"].Count        -gt 0) { $nm   = [string]$f.Properties["name"][0] }
-            if ($f.Properties["description"].Count -gt 0) { $desc = [string]$f.Properties["description"][0] }
-            if (-not [string]::IsNullOrWhiteSpace($unc)) {
-                $results += [PSCustomObject]@{ Name = $nm; UNC = $unc; Description = $desc }
+            $unc = ''; $nm = ''; $desc = ''
+            if ($f.Properties['uncname'].Count     -gt 0) { $unc  = [string]$f.Properties['uncname'][0] }
+            if ($f.Properties['name'].Count        -gt 0) { $nm   = [string]$f.Properties['name'][0] }
+            if ($f.Properties['description'].Count -gt 0) { $desc = [string]$f.Properties['description'][0] }
+            if ($unc -and $seen.Add($unc.TrimEnd('\'))) {
+                $results.Add([PSCustomObject]@{ Name = $nm; UNC = $unc; Description = $desc; Source = 'Annuaire' })
             }
         }
         $found.Dispose()
+        Write-W11BLog -Level 'INFO' -Message "$($results.Count) partage(s) publi&#233;(s) dans l'annuaire."
     } catch {
-        return @()
+        Write-W11BLog -Level 'WARN' -Message "Recherche des objets 'volume' impossible : $($_.Exception.Message)"
     }
-    return $results
+
+    # --- B. Enumeration des partages sur les serveurs du domaine ---
+    $servers = @()
+    try {
+        $searcher = New-Object System.DirectoryServices.DirectorySearcher(
+                        (New-Object System.DirectoryServices.DirectoryEntry("LDAP://$defaultNC")))
+        # comptes ordinateur ACTIFS dont l'OS est un Windows Server
+        # (userAccountControl bit 2 = ACCOUNTDISABLE, via la regle LDAP_MATCHING_RULE_BIT_AND)
+        $searcher.Filter     = '(&(objectCategory=computer)(operatingSystem=*Server*)(!(userAccountControl:1.2.840.113556.1.4.803:=2)))'
+        $searcher.PageSize   = 200
+        $searcher.ClientTimeout = [TimeSpan]::FromSeconds(20)
+        [void]$searcher.PropertiesToLoad.Add('dNSHostName')
+        [void]$searcher.PropertiesToLoad.Add('name')
+
+        $found = $searcher.FindAll()
+        foreach ($f in $found) {
+            $srvName = ''
+            if     ($f.Properties['dnshostname'].Count -gt 0) { $srvName = [string]$f.Properties['dnshostname'][0] }
+            elseif ($f.Properties['name'].Count        -gt 0) { $srvName = [string]$f.Properties['name'][0] }
+            if ($srvName) { $servers += $srvName }
+        }
+        $found.Dispose()
+    } catch {
+        Write-W11BLog -Level 'WARN' -Message "Liste des serveurs du domaine indisponible : $($_.Exception.Message)"
+    }
+
+    $servers = @($servers | Sort-Object -Unique)
+    if ($servers.Count -gt $MaxServers) {
+        Write-W11BLog -Level 'WARN' -Message "$($servers.Count) serveurs trouv&#233;s : seuls les $MaxServers premiers sont interrog&#233;s."
+        $servers = $servers[0..($MaxServers - 1)]
+    }
+    if ($servers.Count -gt 0) {
+        Write-W11BLog -Level 'INFO' -Message "Interrogation de $($servers.Count) serveur(s) du domaine..."
+    }
+
+    foreach ($srv in $servers) {
+        $shares = @(Get-W11BServerShares -Server $srv)
+        if ($shares.Count -eq 0) { continue }
+        Write-W11BLog -Level 'INFO' -Message "  $srv : $($shares.Count) partage(s)"
+        foreach ($s in $shares) {
+            if ($seen.Add($s.UNC.TrimEnd('\'))) { $results.Add($s) }
+        }
+    }
+
+    return @($results | Sort-Object @{ Expression = 'Source'; Descending = $false }, 'UNC')
+}
+
+function Invoke-W11BAsInteractiveUser {
+    <#
+    .SYNOPSIS
+        Execute une commande dans la session de l'utilisateur connecte, en
+        integrite MOYENNE (jeton non eleve).
+    .DESCRIPTION
+        Point cle : Start-Process SANS -Verb RunAs ne desactive PAS l'elevation.
+        Un processus enfant HERITE du jeton de son parent : lance depuis notre
+        processus eleve, cmd.exe serait lui aussi eleve, et le lecteur mappe
+        resterait invisible dans l'Explorateur (isolation UAC).
+        La seule methode fiable pour retomber dans la session de l'utilisateur
+        est de passer par le Planificateur de taches : une tache ephemere avec
+        -LogonType Interactive -RunLevel Limited s'execute avec le jeton limite
+        de l'utilisateur, dans SA session d'ouverture. Le lecteur est alors
+        visible immediatement, sans redemarrage ni EnableLinkedConnections.
+        Retourne le code de sortie du processus.
+    #>
+    param(
+        [Parameter(Mandatory)][string]$FilePath,
+        [string]$Arguments = '',
+        [int]$TimeoutSeconds = 90
+    )
+
+    # Utilisateur reellement connecte a la console : en elevation "par-dessus
+    # l'epaule", $env:USERNAME est le compte admin, pas l'utilisateur de la session.
+    $target = $null
+    try { $target = (Get-CimInstance -ClassName Win32_ComputerSystem -ErrorAction Stop).UserName } catch { }
+    if ([string]::IsNullOrWhiteSpace($target)) { $target = "$env:USERDOMAIN\$env:USERNAME" }
+
+    $taskName = 'Win11-Baseline-' + [guid]::NewGuid().ToString('N').Substring(0, 12)
+    try {
+        $action    = New-ScheduledTaskAction -Execute $FilePath -Argument $Arguments
+        $principal = New-ScheduledTaskPrincipal -UserId $target -LogonType Interactive -RunLevel Limited
+        $settings  = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries `
+                        -ExecutionTimeLimit (New-TimeSpan -Seconds $TimeoutSeconds)
+        Register-ScheduledTask -TaskName $taskName -Action $action -Principal $principal `
+                               -Settings $settings -Force -ErrorAction Stop | Out-Null
+        Start-ScheduledTask -TaskName $taskName -ErrorAction Stop
+
+        $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+        do {
+            Start-Sleep -Milliseconds 300
+            $state = (Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue).State
+        } while ($state -eq 'Running' -and (Get-Date) -lt $deadline)
+
+        if ($state -eq 'Running') { throw "D&#233;lai d&#233;pass&#233; apr&#232;s $TimeoutSeconds s." }
+        return [int](Get-ScheduledTaskInfo -TaskName $taskName -ErrorAction Stop).LastTaskResult
+    } finally {
+        Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction SilentlyContinue
+    }
 }
 
 function New-W11BNetworkDrive {
-    <# .SYNOPSIS Mappe un lecteur reseau PERSISTANT vers un chemin UNC. #>
+    <#
+    .SYNOPSIS
+        Mappe un lecteur reseau PERSISTANT, visible immediatement dans
+        l'Explorateur de l'utilisateur.
+    .DESCRIPTION
+        Le script tourne eleve : un New-PSDrive fait ici creerait le lecteur
+        dans la session du jeton ELEVE, invisible cote Explorateur. On execute
+        donc 'net use' dans la session de l'utilisateur, via
+        Invoke-W11BAsInteractiveUser.
+        La commande est ecrite dans un fichier .cmd temporaire plutot que
+        passee en ligne de commande : un mot de passe en argument serait
+        lisible dans la liste des processus et enregistre par l'audit 4688,
+        que cet outil peut justement activer. Le fichier est supprime dans
+        tous les cas.
+        Repli : si le Planificateur de taches est indisponible, on mappe dans
+        le contexte eleve en signalant clairement la limite dans le journal.
+    #>
     param(
         [Parameter(Mandatory)][ValidatePattern('^[A-Za-z]$')][string]$Letter,
         [Parameter(Mandatory)][string]$UncPath,
         [System.Management.Automation.PSCredential]$Credential,
         [switch]$Replace
     )
-    if ($UncPath -notmatch '^\\\\[^\\]+\\.+') { throw "Chemin UNC invalide (format attendu : \\serveur\partage)" }
-    $Letter = $Letter.ToUpper()
 
+    if ($UncPath -notmatch '^\\\\[^\\]+\\.+') { throw "Chemin UNC invalide (format attendu : \\serveur\partage)" }
+    $Letter  = $Letter.ToUpper()
+    $UncPath = $UncPath.TrimEnd('\')
+
+    # --- Construction de la commande ---
+    $netUse = "net use ${Letter}: `"$UncPath`""
+    if ($Credential) {
+        # Ordre impose par net use : <peripherique> <partage> [mot de passe] [/user:...]
+        $plain = [System.Runtime.InteropServices.Marshal]::PtrToStringAuto(
+                     [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($Credential.Password))
+        $netUse += " `"$plain`" /user:`"$($Credential.UserName)`""
+    }
+    $netUse += ' /persistent:yes'
+
+    # C:\Windows\Temp : accessible aux deux contextes, contrairement au %TEMP%
+    # du profil administrateur en elevation par-dessus l'epaule.
+    $stamp   = [guid]::NewGuid().ToString('N').Substring(0, 12)
+    $cmdFile = Join-Path $env:SystemRoot "Temp\w11b-$stamp.cmd"
+    $outFile = Join-Path $env:SystemRoot "Temp\w11b-$stamp.out"
+
+    try {
+        $lines = @('@echo off')
+        if ($Replace) { $lines += "net use ${Letter}: /delete /y >`"$outFile`" 2>&1" }
+        $lines += "$netUse >>`"$outFile`" 2>&1"
+        $lines += 'exit /b %errorlevel%'
+        Set-Content -Path $cmdFile -Value $lines -Encoding OEM -Force -ErrorAction Stop
+
+        $code = $null
+        if (-not (Test-W11BAdmin)) {
+            # Deja en integrite moyenne : rien a contourner, on execute directement.
+            & $env:ComSpec /c $cmdFile | Out-Null
+            $code = $LASTEXITCODE
+        }
+        else {
+            try {
+                $code = Invoke-W11BAsInteractiveUser -FilePath $env:ComSpec -Arguments "/c `"$cmdFile`""
+            } catch {
+                # Planificateur absent, service arrete, strategie qui bloque la
+                # creation de taches... : on mappe dans le contexte eleve, en le disant.
+                Write-W11BLog -Level 'WARN' -Message "Ex&#233;cution en session utilisateur impossible ($($_.Exception.Message)). Repli sur le contexte &#233;lev&#233; : le lecteur n'appara&#238;tra dans l'Explorateur qu'apr&#232;s r&#233;ouverture de session, ou avec EnableLinkedConnections."
+                return (New-W11BNetworkDriveElevated -Letter $Letter -UncPath $UncPath -Credential $Credential -Replace:$Replace)
+            }
+        }
+
+        $detail = ''
+        if (Test-Path $outFile) {
+            $detail = ((Get-Content -Path $outFile -ErrorAction SilentlyContinue) |
+                        Where-Object { $_ -and $_.Trim() } | Select-Object -Last 3) -join ' '
+        }
+
+        if ($code -ne 0) {
+            $hint = switch ($code) {
+                2  { "acc&#232;s refus&#233; ou partage introuvable" }
+                85 { "la lettre ${Letter}: est d&#233;j&#224; utilis&#233;e dans la session de l'utilisateur" }
+                default { "code $code" }
+            }
+            throw "net use a &#233;chou&#233; ($hint). $detail".Trim()
+        }
+
+        Write-W11BLog -Level 'INFO' -Message "Mappage ex&#233;cut&#233; dans la session de $env:USERNAME (int&#233;grit&#233; moyenne) : visible imm&#233;diatement dans l'Explorateur."
+        return "Lecteur ${Letter}: -> $UncPath (persistant, session utilisateur)"
+
+    } finally {
+        # Le .cmd contient le mot de passe : suppression systematique.
+        foreach ($f in @($cmdFile, $outFile)) {
+            if (Test-Path $f) { Remove-Item -Path $f -Force -ErrorAction SilentlyContinue }
+        }
+    }
+}
+
+function New-W11BNetworkDriveElevated {
+    <# .SYNOPSIS Repli : mappage dans le contexte eleve (visibilite differee). #>
+    param(
+        [Parameter(Mandatory)][string]$Letter,
+        [Parameter(Mandatory)][string]$UncPath,
+        [System.Management.Automation.PSCredential]$Credential,
+        [switch]$Replace
+    )
     $used = @(Get-PSDrive -PSProvider FileSystem -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Name)
     if ($used -contains $Letter) {
-        if (-not $Replace) { throw "La lettre $Letter est deja utilisee (cochez 'remplacer' pour l'ecraser)." }
+        if (-not $Replace) { throw "La lettre $Letter est d&#233;j&#224; utilis&#233;e (cochez 'remplacer' pour l'&#233;craser)." }
         Remove-PSDrive -Name $Letter -Force -ErrorAction SilentlyContinue
         & cmd.exe /c "net use ${Letter}: /delete /y" 2>&1 | Out-Null
     }
-
     $params = @{ Name = $Letter; PSProvider = 'FileSystem'; Root = $UncPath; Persist = $true; Scope = 'Global'; ErrorAction = 'Stop' }
     if ($Credential) { $params['Credential'] = $Credential }
     New-PSDrive @params | Out-Null
-    return "Lecteur ${Letter}: -> $UncPath (persistant)"
+    return "Lecteur ${Letter}: -> $UncPath (persistant, contexte &#233;lev&#233;)"
 }
 
 function Invoke-W11BLinkedConnections {
@@ -1198,7 +1490,7 @@ public static class W11BRunspaceCleanup
 #   * pas d'attribut x:Class, pas de code-behind
 #   * pas de Click="..." dans le XAML (on lie avec Add_Click cote script)
 #   * les listes d'actions ne sont PAS ecrites ici : elles sont GENEREES
-#     depuis $sync.Catalog (voir Add-W11BActionRow)
+#     depuis $sync.Catalog (voir Add-W11BUIActionRow)
 # =====================================================================
 
 $inputXAML = @'
@@ -1771,7 +2063,7 @@ $inputXAML = @'
                     <ComboBox x:Name="CmbShares" Style="{StaticResource Cmb}"/>
                     <Button Grid.Column="1" x:Name="BtnDiscoverAD" Style="{StaticResource BtnSmall}" Margin="8,0,0,0"
                             Content="Rechercher dans l'AD"
-                            ToolTip="Interroge l'annuaire (objets volume) sans RSAT. N&#233;cessite que le poste soit d&#233;j&#224; membre du domaine."/>
+                            ToolTip="Liste les partages publi&#233;s dans l'annuaire ET les partages des serveurs du domaine (sans RSAT). N&#233;cessite que le poste soit d&#233;j&#224; membre du domaine."/>
                   </Grid>
                   <TextBlock Grid.Row="1" Text="Chemin UNC" VerticalAlignment="Center" Margin="0,0,0,8"/>
                   <TextBox   Grid.Row="1" Grid.Column="1" x:Name="TxtUnc" Style="{StaticResource Field}" Margin="0,0,0,8"
@@ -2532,10 +2824,10 @@ function Start-W11BGui {
         $sync.BtnDiscoverAD.IsEnabled = $false
         $sync.ADShares.Clear()
         $sync.ADSharesReady = $false
-        Write-W11BLog -Level 'INFO' -Message 'Recherche des partages publi&#233;s dans l''Active Directory...'
+        Write-W11BLog -Level 'INFO' -Message 'Recherche des partages du domaine (annuaire + serveurs)...'
         Start-W11BRunspace -ScriptBlock {
             foreach ($s in @(Get-W11BADPublishedShares)) { $sync.ADShares.Add($s) }
-            Write-W11BLog -Level 'INFO' -Message "$($sync.ADShares.Count) partage(s) publi&#233;(s) trouv&#233;(s)."
+            Write-W11BLog -Level 'INFO' -Message "$($sync.ADShares.Count) partage(s) trouv&#233;(s)."
             $sync.ADSharesReady = $true
         } | Out-Null
     })
