@@ -16,10 +16,6 @@ Application graphique PowerShell pour initialiser et durcir un poste client Wind
 irm https://raw.githubusercontent.com/QuentinABG/Win11-Baseline/main/Init-WindowsClient11.ps1 | iex
 ```
 
-Une console utilisateur standard suffit : le script est exécuté en mémoire, demande l'élévation (UAC), puis ouvre sa fenêtre.
-
-> En production, remplacez `main` par un tag de release (`.../v2.0.0/...`).
-
 ---
 
 ## Interface
