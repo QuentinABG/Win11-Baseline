@@ -54,7 +54,10 @@ param(
     [Alias('CLI')]
     [switch]$NoGUI,
 
-    [ValidateSet('CIS-L1','CIS-L2','ANSSI-Minimal','ANSSI-Intermediaire','ANSSI-Eleve','ANSSI-Renforce')]
+    # La chaine vide DOIT figurer dans le jeu : sous 'irm | iex' le bloc param()
+    # est evalue sans argument, $Preset vaut '' et ValidateSet rejetterait cette
+    # valeur des l'attachement de l'attribut. (Meme contournement que WinUtil.)
+    [ValidateSet('CIS-L1','CIS-L2','ANSSI-Minimal','ANSSI-Intermediaire','ANSSI-Eleve','ANSSI-Renforce','')]
     [string]$Preset,
 
     [string[]]$Actions,
