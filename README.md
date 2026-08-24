@@ -2,12 +2,13 @@
 
 ![PowerShell](https://img.shields.io/badge/PowerShell-5.1%2B-5391FE?logo=powershell&logoColor=white)
 ![Platform](https://img.shields.io/badge/Windows-11-0078D6?logo=windows&logoColor=white)
+![GUI](https://img.shields.io/badge/Interface-WPF-3B82F6?logo=windows&logoColor=white)
 ![License](https://img.shields.io/badge/Licence-MIT-green)
 ![Status](https://img.shields.io/badge/Statut-Actif-brightgreen)
 ![Quick Launch](https://img.shields.io/badge/Lancement-1%20commande%20PowerShell-5391FE?logo=powershell&logoColor=white)
 
-**Script PowerShell 100 % interactif d'initialisation et de durcissement d'un poste client Windows 11.**
-Configuration réseau, renommage et jonction au domaine, mappage de lecteurs réseau, puis durcissement de la sécurité selon les référentiels **CIS Benchmark** ou **ANSSI BP‑028** — avec reprise automatique après redémarrage.
+**Application graphique PowerShell d'initialisation et de durcissement d'un poste client Windows 11.**
+Un seul fichier `.ps1`, aucune installation : configuration réseau, renommage et jonction au domaine, mappage de lecteurs réseau, et durcissement **à la carte** selon les référentiels **CIS Benchmark** ou **ANSSI BP‑028**.
 
 > ⚠️ **Avertissement** : le module de durcissement applique un **sous‑ensemble représentatif** de mesures inspirées de CIS et de l'ANSSI. Il ne constitue **ni une implémentation exhaustive ni une certification de conformité**. Testez toujours sur un poste pilote avant tout déploiement ; en production, privilégiez GPO / Microsoft Intune.
 
@@ -21,7 +22,7 @@ Ouvrez **PowerShell** (une console utilisateur standard suffit : l'élévation e
 irm https://raw.githubusercontent.com/QuentinABG/Win11-Baseline/main/Init-WindowsClient11.ps1 | iex
 ```
 
-Rien à cloner, rien à décompresser : le script est téléchargé et exécuté **en mémoire**, demande les droits administrateur (UAC), puis affiche son écran d'accueil.
+Rien à cloner, rien à décompresser : le script est téléchargé et exécuté **en mémoire**, demande les droits administrateur (UAC), puis **ouvre sa fenêtre**.
 
 <details>
 <summary>Que fait exactement cette commande ?</summary>
@@ -30,113 +31,91 @@ Rien à cloner, rien à décompresser : le script est téléchargé et exécuté
 |-------|--------|
 | `irm` | `Invoke-RestMethod` télécharge le **texte** du script depuis GitHub (aucun fichier écrit sur le disque). |
 | `\| iex` | `Invoke-Expression` exécute ce texte dans la session PowerShell courante. La stratégie d'exécution (`Restricted`) ne s'applique pas : aucun fichier `.ps1` n'est chargé. |
-| Élévation | Si la console n'est pas administrateur, le script relance **la même commande** dans une fenêtre élevée (`Start-Process powershell -Verb RunAs` + `-Command`), en conservant `-NoProfile -ExecutionPolicy Bypass`. |
-| Accueil | Un menu s'affiche : `1` pour lancer l'initialisation, `2` pour quitter. |
+| Élévation | Si la console n'est pas administrateur, le script relance **la même commande** dans une fenêtre élevée (`Start-Process powershell -Verb RunAs` + `-Command`), en conservant `-NoProfile -ExecutionPolicy Bypass -STA`. |
+| Interface | La fenêtre WPF s'ouvre : catégories à gauche, interrupteurs au centre, journal temps réel en bas. |
 
 </details>
 
 > 💡 Version figée (recommandé en production) : remplacez `main` par un tag de release, par exemple
-> `.../Win11-Baseline/v1.0.0/Init-WindowsClient11.ps1`.
+> `.../Win11-Baseline/v2.0.0/Init-WindowsClient11.ps1`.
 
 ---
 
 ## Sommaire
 
 - [Quick Launch](#-quick-launch)
+- [L'interface](#linterface)
 - [Fonctionnalités](#fonctionnalités)
-- [Prérequis](#prérequis)
-- [Installation](#installation)
-- [Utilisation](#utilisation)
-- [Détail des étapes](#détail-des-étapes)
+- [Catalogue des actions](#catalogue-des-actions)
 - [Niveaux de durcissement](#niveaux-de-durcissement)
-- [Reprise après redémarrage](#reprise-après-redémarrage)
-- [Structure du dépôt](#structure-du-dépôt)
+- [Mode sans interface (déploiement)](#mode-sans-interface-déploiement)
+- [Journalisation](#journalisation)
+- [Prérequis](#prérequis)
+- [Installation locale](#installation-locale)
+- [Architecture technique](#architecture-technique)
 - [Avertissements et limites](#avertissements-et-limites)
 - [Contribuer](#contribuer)
 - [Licence](#licence)
 
 ---
 
+## L'interface
+
+<!-- TODO : remplacer par une vraie capture — Win + Maj + S, puis déposer l'image dans docs/screenshot.png -->
+<p align="center">
+  <img src="docs/screenshot.png" alt="Interface de Win11-Baseline" width="900">
+  <br>
+  <em>Placeholder — capture d'écran à ajouter dans <code>docs/screenshot.png</code></em>
+</p>
+
+L'application reprend le modèle de **[WinUtil](https://github.com/ChrisTitusTech/winutil)** : thème sombre, navigation latérale par catégories, interrupteurs par mesure, exécution en arrière‑plan et journal temps réel.
+
+| Zone | Rôle |
+|------|------|
+| **En‑tête** | Version, nom du poste, utilisateur, mode d'exécution et **badge d'élévation** (vert = administrateur). |
+| **Navigation latérale** | Six catégories : *Système et réseau*, *Sécurité — Socle / Intermédiaire / Élevé / Renforcé*, *Préréglages*. |
+| **Liste d'actions** | Un interrupteur par mesure, avec info‑bulle explicative et **pastilles** : `Sensible`, `Risque élevé`, `Redémarrage`. |
+| **Boutons de catégorie** | *Tout sélectionner* / *Tout désélectionner* dans chaque onglet de sécurité. |
+| **Préréglages** | Un clic coche les mesures d'un niveau CIS ou ANSSI ; le détail reste ajustable ensuite. |
+| **Progression** | Barre, libellé de l'action en cours et compteur d'actions restantes. |
+| **Journal** | Défilement temps réel des commandes et de leurs résultats, avec bouton d'ouverture du fichier de log. |
+| **Pied de page** | Compteur de sélection, *Annuler la sélection* (rollback) et **Appliquer la baseline**. |
+
+L'interface reste **réactive pendant l'exécution** : tout le travail se fait dans un runspace séparé. Fermer la fenêtre en cours d'exécution demande une confirmation.
+
+---
+
 ## Fonctionnalités
 
-- **Auto‑élévation** : le script demande les droits administrateur (UAC) et se relance élevé si nécessaire.
-- **`[1/4]` Configuration IP** : sélection de la carte, adressage statique (IP/CIDR/passerelle/DNS) ou retour en DHCP, avec validation.
-- **`[2/4]` Nom & domaine** : renommage du poste (nom NetBIOS validé) et jonction à un domaine Active Directory. Identifiants saisis **dans la console** ou via une **fenêtre popup** (`Get-Credential`).
-- **`[3/4]` Lecteur réseau** : **découverte automatique des partages publiés dans l'Active Directory** (objets `volume`, via `System.DirectoryServices` — **sans RSAT**) ou saisie manuelle d'un chemin UNC, puis mappage **persistant**.
-- **`[4/4]` Durcissement** : choix entre **CIS Benchmark** (L1 / L2) et **ANSSI BP‑028** (Minimal / Intermédiaire / Élevé / Renforcé), avec description de chaque niveau et sélection par numéro.
-- **Reprise après redémarrage** : l'avancement est sauvegardé ; une tâche planifiée relance le script après le reboot pour poursuivre là où il s'était arrêté.
-- **Journalisation** : un transcript est enregistré dans `%TEMP%\Init-WindowsClient11.log`.
-- **Récapitulatifs** clairs et colorés à la fin de chaque étape.
+- **Sélection à la carte** — chaque mesure de durcissement est un interrupteur indépendant, avec description et niveau de risque.
+- **Préréglages en un clic** — CIS L1 / L2 et ANSSI Minimal / Intermédiaire / Élevé / Renforcé (niveaux cumulatifs).
+- **Formulaires intégrés** — configuration IP, renommage, jonction de domaine et mappage de lecteur se saisissent dans la fenêtre, plus aucune question en console.
+- **Découverte AD sans RSAT** — les partages publiés dans l'annuaire (objets `volume`) sont listés via `System.DirectoryServices`, en tâche de fond.
+- **Point de restauration** — proposé avant application, coché automatiquement avec un préréglage.
+- **Annulation** — la plupart des mesures disposent d'une fonction de retour à la valeur par défaut de Windows (bouton *Annuler la sélection*).
+- **Auto‑élévation** — UAC demandé automatiquement, y compris en exécution `irm | iex`.
+- **Mode sans interface** — `-NoGUI` pour Intune, GPO ou SCCM, avec code de sortie.
+- **Journalisation complète** — fichier horodaté dans `%LOCALAPPDATA%\Win11-Baseline\logs\`.
 
 ---
 
-## Prérequis
+## Catalogue des actions
 
-- **Windows 11** (le script cible le client ; il utilise des cmdlets présentes par défaut).
-- **Windows PowerShell 5.1** (inclus dans Windows 11).
-- **Droits administrateur** sur le poste (le script s'auto‑élève).
-- Aucune dépendance externe : la découverte AD utilise `System.DirectoryServices` (natif .NET), **RSAT n'est pas requis**.
-
----
-
-## Installation
-
-**Aucune installation n'est nécessaire** avec le [Quick Launch](#-quick-launch) ci‑dessus.
-
-L'installation locale reste utile pour un poste **sans accès Internet**, un déploiement depuis une **clé USB**, ou pour travailler sur une version modifiée du script. Clonez le dépôt (ou téléchargez l'archive ZIP) :
-
-```bash
-git clone https://github.com/QuentinABG/Win11-Baseline.git
-```
-
-Gardez **les deux fichiers dans le même dossier** :
-
-- `Init-WindowsClient11.ps1` — le script principal
-- `Lancer-Init-WindowsClient11.cmd` — le lanceur (double‑clic, contourne l'`ExecutionPolicy`)
-
----
-
-## Utilisation
-
-Windows 11 est en stratégie d'exécution `Restricted` par défaut : un double‑clic direct sur un `.ps1` est bloqué. Le **lanceur `.cmd`** contourne ce point le temps d'une exécution, sans modification permanente du poste.
-
-### Méthode recommandée (en ligne)
-
-Collez la commande du [Quick Launch](#-quick-launch) dans une console PowerShell. Acceptez l'invite UAC, puis répondez aux questions.
-
-### Méthode locale (hors ligne / clé USB)
-
-**Double‑cliquez sur `Lancer-Init-WindowsClient11.cmd`.** Acceptez l'invite UAC, puis répondez aux questions.
-
-Au premier lancement, le script propose (facultatif) de régler durablement la stratégie machine sur `RemoteSigned`, ce qui permet ensuite le **double‑clic direct** sur le `.ps1`.
-
-### Méthodes alternatives
-
-Depuis une console PowerShell **ouverte en administrateur** :
+35 actions réparties en cinq catégories. La liste complète, avec identifiants et niveaux de risque, s'obtient sans droits particuliers :
 
 ```powershell
-Set-Location "C:\chemin\vers\le\dossier"
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File ".\Init-WindowsClient11.ps1"
+&([scriptblock]::Create((irm 'https://raw.githubusercontent.com/QuentinABG/Win11-Baseline/main/Init-WindowsClient11.ps1'))) -ListActions
 ```
 
-Ou, pour autoriser durablement le double‑clic (une fois, pour l'utilisateur courant) :
+| Catégorie | Contenu |
+|-----------|---------|
+| **Système et réseau** | Point de restauration, configuration IP, renommage, jonction AD, mappage de lecteur, `EnableLinkedConnections` |
+| **Sécurité — Socle** | Pare‑feu, SMBv1 off, UAC, AutoRun off, compte Invité off, politique de mots de passe, Defender |
+| **Sécurité — Intermédiaire** | Signature SMB, NTLM durci, accès anonyme restreint, LLMNR off, journalisation PowerShell, audit, verrouillage écran |
+| **Sécurité — Élevé** | WDigest off, LSASS PPL, audit 4688, transcription PowerShell, RDP NLA, assistance distante off, *Controlled Folder Access*, signature LDAP, cache d'ouvertures de session |
+| **Sécurité — Renforcé** | Règles ASR, VBS / Credential Guard, effacement du pagefile, PowerShell v2 off, `RemoteSigned`, bannière légale |
 
-```powershell
-Set-ExecutionPolicy -Scope CurrentUser -ExecutionPolicy RemoteSigned
-```
-
----
-
-## Détail des étapes
-
-| Étape | Nom | Description |
-|:-----:|-----|-------------|
-| `1/4` | Configuration IP | Carte réseau, IP statique (IP/CIDR/passerelle/DNS) ou DHCP |
-| `2/4` | Nom & domaine | Renommage NetBIOS + jonction AD (identifiants console ou popup) |
-| `3/4` | Lecteur réseau | Découverte des partages publiés dans l'AD ou UNC manuel, mappage persistant |
-| `4/4` | Durcissement | CIS Benchmark ou ANSSI BP‑028, par niveau |
-
-Chaque étape est **facultative** et peut être ignorée. Les étapes nom/domaine et certaines mesures de durcissement nécessitent un redémarrage, **différé à la fin** (un seul reboot proposé) afin de ne pas interrompre le parcours.
+Les mesures qui peuvent **casser un usage** portent une pastille `Sensible` ou `Risque élevé`, et une confirmation récapitule les mesures à risque élevé avant application.
 
 ---
 
@@ -148,58 +127,121 @@ Les niveaux sont **cumulatifs** (un niveau supérieur inclut les précédents).
 
 | Niveau | Cible | Contenu principal |
 |--------|-------|-------------------|
-| **L1 — Sécurité de base** | Majorité des postes | Pare‑feu, UAC, SMBv1 off, NTLM durci, LLMNR off, politique de mots de passe, audit de base, verrouillage écran |
-| **L2 — Défense en profondeur** | Environnements sensibles | L1 + WDigest off, LSASS protégé, RDP NLA, assistance distante off, Controlled Folder Access, transcription PowerShell, signature LDAP, audit 4688 |
+| **L1 — Sécurité de base** | Majorité des postes | Socle + Intermédiaire |
+| **L2 — Défense en profondeur** | Environnements sensibles | L1 + mesures Élevé |
 
 ### ANSSI BP‑028
 
 | Niveau | Cible | Contenu principal |
 |--------|-------|-------------------|
-| **Minimal** | Postes exposés à Internet, données peu sensibles | Pare‑feu, UAC, SMBv1 off, AutoRun off, compte Invité off, antivirus actif, politique de mots de passe |
-| **Intermédiaire** | Réseau d'entreprise standard | Minimal + signature SMB, NTLM durci, LLMNR off, restriction anonyme, journalisation PowerShell, audit, verrouillage écran |
-| **Élevé** | Données sensibles (RH, finance, R&D) | Intermédiaire + WDigest off, LSASS protégé, RDP NLA, assistance distante off, Controlled Folder Access, signature LDAP, audit 4688 |
-| **Renforcé** | OIV, défense | Élevé + règles ASR, VBS / Credential Guard, effacement du pagefile, PowerShell v2 off, bannière légale |
+| **Minimal** | Postes exposés à Internet, données peu sensibles | Socle |
+| **Intermédiaire** | Réseau d'entreprise standard | Socle + Intermédiaire |
+| **Élevé** | Données sensibles (RH, finance, R&D) | + mesures Élevé |
+| **Renforcé** | OIV, défense | + mesures Renforcé |
 
-> Les mesures s'appliquent **localement** (stratégies machine du registre + cmdlets natives), ce qui convient aussi bien à un poste autonome qu'à un futur membre de domaine.
-
----
-
-## Reprise après redémarrage
-
-L'avancement est enregistré dans `%ProgramData%\Init-WindowsClient11\state.json`.
-
-- Au démarrage, si un état est détecté, le script propose de **reprendre** (les étapes déjà réalisées sont ignorées) ou de **tout recommencer**.
-- Lorsqu'un redémarrage est déclenché par le script (par exemple après une jonction au domaine, pour rendre la découverte AD effective), une **tâche planifiée « à l'ouverture de session »** relance automatiquement le script pour poursuivre.
-- En fin de parcours complet, l'état et la tâche de reprise sont supprimés.
+> Les mesures s'appliquent **localement** (stratégies machine du registre + cmdlets natives), ce qui convient aussi bien à un poste autonome qu'à un membre de domaine.
 
 ---
 
-## Structure du dépôt
+## Mode sans interface (déploiement)
+
+Pour Intune, une GPO de démarrage, SCCM ou tout scénario non interactif :
+
+```powershell
+# Un niveau complet
+&([scriptblock]::Create((irm 'https://raw.githubusercontent.com/QuentinABG/Win11-Baseline/main/Init-WindowsClient11.ps1'))) -NoGUI -Preset ANSSI-Eleve
+
+# Des mesures précises
+&([scriptblock]::Create((irm 'https://raw.githubusercontent.com/QuentinABG/Win11-Baseline/main/Init-WindowsClient11.ps1'))) -NoGUI -Actions SEC-Firewall,SEC-SMB1Off,SEC-LLMNR
+
+# Depuis un fichier local
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Init-WindowsClient11.ps1 -NoGUI -Preset CIS-L1
+```
+
+| Paramètre | Rôle |
+|-----------|------|
+| `-NoGUI` (alias `-CLI`) | Exécute sans interface, sans aucune interaction. |
+| `-Preset <niveau>` | `CIS-L1`, `CIS-L2`, `ANSSI-Minimal`, `ANSSI-Intermediaire`, `ANSSI-Eleve`, `ANSSI-Renforce`. |
+| `-Actions <id,...>` | Identifiants d'actions, cumulables avec `-Preset`. |
+| `-ListActions` | Affiche le catalogue et quitte (aucun droit requis). |
+
+**Code de sortie** : `0` si aucune erreur, `1` si au moins une action a échoué, `2` si un identifiant est inconnu.
+
+> La forme `irm ... | iex` **ne transmet pas de paramètres** : utilisez `&([scriptblock]::Create((irm '<url>'))) -NoGUI ...`.
+> Les actions de type formulaire (IP, renommage, jonction, mappage) exigent des saisies : elles sont **ignorées** en mode sans interface et signalées dans le journal.
+
+---
+
+## Journalisation
+
+Chaque session écrit un fichier horodaté :
 
 ```
-Win11-Baseline/
-├─ Init-WindowsClient11.ps1        # Script principal (interactif)
-├─ Lancer-Init-WindowsClient11.cmd # Lanceur (contourne l'ExecutionPolicy)
-├─ README.md                       # Ce fichier
-├─ LICENSE                         # Licence MIT
-└─ .gitignore
+%LOCALAPPDATA%\Win11-Baseline\logs\AAAA-MM-JJ_HH-mm-ss.log
 ```
+
+Format `[heure] [niveau] message`, niveaux `INFO` / `RUN` / `OK` / `WARN` / `ERR` / `STEP`. Le même flux alimente le panneau de journal de la fenêtre. Le résumé de fin propose d'ouvrir le fichier.
+
+---
+
+## Prérequis
+
+- **Windows 11** (cmdlets natives, aucune dépendance externe).
+- **Windows PowerShell 5.1** (inclus dans Windows 11). Fonctionne aussi sous PowerShell 7 lancé en `-STA`.
+- **Droits administrateur** (le script s'auto‑élève).
+- **.NET Framework / WPF** : présents en standard sur Windows 11.
+- La découverte AD utilise `System.DirectoryServices` : **RSAT n'est pas requis**.
+
+---
+
+## Installation locale
+
+Inutile avec le [Quick Launch](#-quick-launch). L'installation locale sert pour un poste **sans accès Internet**, un déploiement depuis une **clé USB**, ou pour travailler sur une version modifiée.
+
+```bash
+git clone https://github.com/QuentinABG/Win11-Baseline.git
+```
+
+Gardez les deux fichiers dans le même dossier :
+
+- `Init-WindowsClient11.ps1` — l'application
+- `Lancer-Init-WindowsClient11.cmd` — le lanceur (double‑clic, contourne l'`ExecutionPolicy`)
+
+> ⚠️ Le fichier `.ps1` doit rester encodé en **UTF‑8 avec BOM** : Windows PowerShell 5.1 lit sinon les accents en ANSI et l'interface s'affiche avec des caractères erronés.
+
+---
+
+## Architecture technique
+
+Fichier unique, sections délimitées : `# CONFIG` / `# FONCTIONS` / `# CATALOGUE` / `# XAML` / `# GUI` / `# LOGIQUE`.
+
+| Brique | Mise en œuvre |
+|--------|---------------|
+| **Interface** | XAML intégré en here‑string, chargé par `[Windows.Markup.XamlReader]::Load()`, affiché par `ShowDialog()` sur un thread **STA**. |
+| **État partagé** | `$sync = [Hashtable]::Synchronized(@{})` — unique canal entre le thread UI et les runspaces. |
+| **Exécution** | `RunspacePool` dont l'`InitialSessionState` reçoit `$sync` et toutes les fonctions `*W11B*`. L'instance PowerShell est libérée via `RegisterWaitForSingleObject` (pas de fuite de runspace). |
+| **Journal & progression** | Les runspaces écrivent dans une `ConcurrentQueue` ; un `DispatcherTimer` (150 ms) la draine côté UI. Aucun contrôle WPF n'est touché depuis un runspace. |
+| **Catalogue** | Source unique de vérité : l'interface est **générée** à partir de `$sync.Catalog`. Le catalogue ne stocke que des **noms de fonctions** (jamais des `scriptblock`, qui traversent mal les runspaces). |
+| **Fonctions d'action** | Pures, sans dépendance à la GUI, donc réutilisables en CLI. Chacune lève une exception en cas d'échec ; le wrapper journalise et poursuit. |
+
+Ajouter une mesure = ajouter une fonction `Invoke-W11B<Nom>` (et éventuellement `Undo-W11B<Nom>`) puis une entrée dans `$sync.Catalog`. Elle apparaît automatiquement dans l'interface et devient utilisable via `-Actions`.
 
 ---
 
 ## Avertissements et limites
 
-- **Ce n'est pas une certification de conformité.** CIS et ANSSI comportent des centaines de contrôles ; ce script en applique un sous‑ensemble représentatif et raisonnablement sûr.
-- **Testez sur un poste pilote** avant tout déploiement. Certaines mesures du niveau *Renforcé* (VBS / Credential Guard, désactivation de PowerShell v2, LSASS PPL) requièrent du matériel compatible et un redémarrage, et peuvent impacter des usages.
-- **Contexte élevé (UAC)** : un lecteur réseau mappé en administrateur peut ne pas apparaître immédiatement dans la session standard ; étant persistant, il se reconnecte à l'ouverture de session suivante. Le script propose d'activer `EnableLinkedConnections` pour une visibilité immédiate.
-- **Découverte AD** : seuls les partages **explicitement publiés** dans l'Active Directory sont remontés en découverte automatique. Une jonction récente n'est effective qu'après redémarrage.
-- Pour un **parc**, le déploiement (mappage de lecteurs, durcissement) se fait idéalement côté serveur via **GPO** ou **Intune**.
+- **Ce n'est pas une certification de conformité.** CIS et ANSSI comportent des centaines de contrôles ; ce projet en applique un sous‑ensemble représentatif et raisonnablement sûr.
+- **Testez sur un poste pilote.** Les mesures marquées `Risque élevé` (*Controlled Folder Access*, règles ASR, VBS / Credential Guard, cache d'ouvertures de session) peuvent bloquer des usages métier ou, sur du matériel non compatible, empêcher le démarrage.
+- **Annulation partielle.** Les mesures de registre et de service savent revenir au défaut Windows. Les actions de type formulaire (jonction de domaine, renommage, configuration IP) **ne sont pas réversibles** automatiquement.
+- **Jonction de domaine.** Elle n'est effective **qu'après redémarrage** : la découverte AD des partages publiés ne fonctionnera pas dans la même session.
+- **Contexte élevé (UAC).** Un lecteur mappé en administrateur peut ne pas apparaître immédiatement en session standard ; l'action `EnableLinkedConnections` corrige ce point (redémarrage requis).
+- Pour un **parc**, le durcissement et le mappage de lecteurs se déploient idéalement via **GPO** ou **Intune**.
 
 ---
 
 ## Contribuer
 
-Les contributions sont les bienvenues. Ouvrez une *issue* pour signaler un bug ou proposer une amélioration, ou soumettez une *pull request*. Merci de préciser la version de Windows et de PowerShell utilisée pour tout rapport de bug.
+Les contributions sont les bienvenues. Ouvrez une *issue* pour signaler un bug ou proposer une mesure, ou soumettez une *pull request*. Merci de préciser la version de Windows et de PowerShell utilisée pour tout rapport de bug, et de joindre l'extrait de journal correspondant.
 
 ---
 
