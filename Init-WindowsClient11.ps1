@@ -1630,7 +1630,7 @@ $inputXAML = @'
       <RowDefinition Height="Auto"/>   <!-- 0 : en-tete -->
       <RowDefinition Height="*"/>      <!-- 1 : navigation+contenu -->
       <RowDefinition Height="Auto"/>   <!-- 2 : progression -->
-      <RowDefinition Height="190"/>    <!-- 3 : journal -->
+      <RowDefinition Height="Auto"/>   <!-- 3 : journal (repliable) -->
       <RowDefinition Height="Auto"/>   <!-- 4 : pied de page -->
     </Grid.RowDefinitions>
 
@@ -1970,6 +1970,7 @@ $inputXAML = @'
         <Grid.ColumnDefinitions>
           <ColumnDefinition Width="*"/>
           <ColumnDefinition Width="Auto"/>
+          <ColumnDefinition Width="Auto"/>
         </Grid.ColumnDefinitions>
         <StackPanel Grid.Column="0" Margin="0,0,20,0">
           <TextBlock x:Name="LblStep" Style="{StaticResource Muted}" FontSize="12" Text="En attente"/>
@@ -1977,11 +1978,15 @@ $inputXAML = @'
         </StackPanel>
         <TextBlock Grid.Column="1" x:Name="LblCount" VerticalAlignment="Center"
                    Style="{StaticResource Muted}" FontSize="12" Text="0 / 0"/>
+        <Button Grid.Column="2" x:Name="BtnToggleLog" Style="{StaticResource BtnSmall}"
+                Margin="16,0,0,0" VerticalAlignment="Center" MinWidth="150"
+                Content="Masquer le journal"
+                ToolTip="Replie ou deplie le panneau de journal. Le journal continue d etre ecrit dans le fichier meme lorsqu il est masque."/>
       </Grid>
     </Border>
 
     <!-- 3 : JOURNAL TEMPS REEL -->
-    <Border Grid.Row="3" Background="#0F1013" BorderBrush="{StaticResource BorderCol}" BorderThickness="0,1,0,1">
+    <Border Grid.Row="3" x:Name="LogPanel" Height="190" Background="#0F1013" BorderBrush="{StaticResource BorderCol}" BorderThickness="0,1,0,1">
       <Grid>
         <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/></Grid.RowDefinitions>
         <Grid Grid.Row="0" Margin="22,8,22,4">
@@ -2507,6 +2512,19 @@ function Start-W11BGui {
     })
     $sync.BtnClearLog.Add_Click({ $sync.LogBox.Clear() })
 
+    # Afficher / masquer le journal. La rangee de la grille est en Auto :
+    # replier la bordure suffit a rendre la hauteur au contenu au-dessus.
+    $sync.BtnToggleLog.Add_Click({
+        if ($sync.LogPanel.Visibility -eq [System.Windows.Visibility]::Visible) {
+            $sync.LogPanel.Visibility = [System.Windows.Visibility]::Collapsed
+            $sync.BtnToggleLog.Content = Get-W11BText 'Afficher le journal'
+        } else {
+            $sync.LogPanel.Visibility = [System.Windows.Visibility]::Visible
+            $sync.BtnToggleLog.Content = Get-W11BText 'Masquer le journal'
+            $sync.LogBox.ScrollToEnd()
+        }
+    })
+
     # --- Bouton : decouverte des partages publies dans l'AD ---------------
     # Requete LDAP potentiellement lente -> runspace, jamais sur le thread UI.
     $sync.BtnDiscoverAD.Add_Click({
@@ -2544,7 +2562,7 @@ function Start-W11BGui {
             $sync.LogBox.AppendText($line + [Environment]::NewLine)
             $n++
         }
-        if ($n -gt 0) { $sync.LogBox.ScrollToEnd() }
+        if ($n -gt 0 -and $sync.LogPanel.Visibility -eq [System.Windows.Visibility]::Visible) { $sync.LogBox.ScrollToEnd() }
 
         if ($sync.Running -and $sync.ProgressTotal -gt 0) {
             $sync.Bar.Value     = [math]::Min(100, ($sync.Progress / $sync.ProgressTotal) * 100)
